@@ -444,6 +444,7 @@ local function collectScriptsRecursive(state, root, relativePath)
 						size = #bytes,
 						sha256 = crypto.sha256(bytes),
 						mtime = os.getLastWriteTime(fullPath),
+						sourcePath = fullPath,
 					}
 					table.insert(state.scripts, record)
 					state.scriptsByPath[relPath] = record
@@ -579,6 +580,7 @@ local function collectAssetFilesRecursive(state, root, syncRootPrefix, relativeP
 							size = #bytes,
 							sha256 = crypto.sha256(bytes),
 							mtime = os.getLastWriteTime(fullPath),
+							sourcePath = fullPath,
 						}
 						if not state.assetFilesByPath[syncPath] then
 							table.insert(state.assetFiles, record)
