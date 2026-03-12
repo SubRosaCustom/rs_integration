@@ -394,23 +394,6 @@ function M.isSafeAssetSyncPath(path)
 		return false
 	end
 
-	local isDataPath = lowerPath:sub(1, 5) == "data/"
-	local isTexturePath = lowerPath:sub(1, 8) == "texture/"
-	local isSoundPath = lowerPath:sub(1, 6) == "sound/"
-	if not isDataPath and not isTexturePath and not isSoundPath then
-		return false
-	end
-
-	-- Texture sync is PNG-only and explicit denylist protected above.
-	if isTexturePath and fileExtension(lowerPath) ~= ".png" then
-		return false
-	end
-
-	-- Sound sync is WAV-only and rooted under sound/.
-	if isSoundPath and fileExtension(lowerPath) ~= ".wav" then
-		return false
-	end
-
 	return true
 end
 
@@ -437,6 +420,10 @@ local function collectScriptsRecursive(state, root, relativePath)
 
 	for _, entry in ipairs(entries) do
 		if entry.isDirectory then
+			if relativePath == "" and (entry.name == "assets" or entry.name == "scripts") then
+				goto continue
+			end
+
 			local child = entry.name
 			if relativePath ~= "" then
 				child = relativePath .. "/" .. entry.name
@@ -463,6 +450,8 @@ local function collectScriptsRecursive(state, root, relativePath)
 				end
 			end
 		end
+
+		::continue::
 	end
 end
 
@@ -475,6 +464,9 @@ function M.discoverScripts(state)
 	state.scriptsByPath = {}
 
 	collectScriptsRecursive(state, root, "")
+	if #state.scripts == 0 then
+		collectScriptsRecursive(state, state.config.clientRoot, "")
+	end
 
 	table.sort(state.scripts, function(a, b)
 		return a.path < b.path
