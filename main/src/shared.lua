@@ -598,6 +598,11 @@ function M.discoverAssetFiles(state)
 	local normalizedLevel = M.normalizeLoadedLevel(server and server.loadedLevel or nil)
 	state.loadedLevel = normalizedLevel
 
+	if normalizedLevel ~= "" and not isDefaultGameMapName(normalizedLevel) then
+		local levelSyncRoot = "data/" .. normalizedLevel
+		collectAssetFilesRecursive(state, levelSyncRoot, levelSyncRoot, "")
+	end
+
 	pcall(os.createDirectory, state.config.clientRoot)
 	local root = M.assetsRoot(state.config)
 	pcall(os.createDirectory, root)
