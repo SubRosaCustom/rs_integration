@@ -56,6 +56,16 @@ Common settings include:
 
 `clientRoot` is the server-side directory tree that gets indexed and synced to SRC clients.
 
+Current layout under `clientRoot`:
+
+- `scripts/` contains synced Lua, YAML, and JSON script/runtime files
+- `assets/` contains synced client assets such as `.cmo`, `.png`, `.wav`, `.csx`, `.sbc`, and `.sbl`
+
+Logical sync paths stay clean:
+
+- scripts are indexed relative to `scripts/`, so the client still sees paths like `main/init.lua`
+- assets are indexed relative to `assets/`, so the client still sees paths like `data/model/foo.cmo` or `texture/icon-foo.png`
+
 ## Runtime Role
 
 At runtime, `rs_integration` sits in the RosaServer process and delivers the client-side runtime to SRC players.
@@ -64,7 +74,8 @@ That typically means:
 
 - `client` is installed on the player's machine
 - `rs_integration` runs on the server
-- `core` and other synced client files live under `clientRoot`
+- `core` and other synced client scripts live under `clientRoot/scripts`
+- synced client assets live under `clientRoot/assets`
 - the server syncs those files to the client during join/resync
 
 ## Related Repositories

@@ -214,9 +214,9 @@ local function startNextFileTransfer(state, connection, client)
 	local relPath = table.remove(client.pendingFileRequests, 1)
 	local fullPath = nil
 	if state.scriptsByPath[relPath] then
-		fullPath = shared.joinPath(state.config.clientRoot, relPath)
+		fullPath = shared.joinPath(shared.scriptsRoot(state.config), relPath)
 	elseif state.assetFilesByPath[relPath] then
-		fullPath = relPath
+		fullPath = shared.joinPath(shared.assetsRoot(state.config), relPath)
 	end
 
 	if not fullPath then

@@ -148,6 +148,14 @@ function M.joinPath(a, b)
 	return a .. "/" .. b
 end
 
+function M.scriptsRoot(config)
+	return M.joinPath(config.clientRoot, "scripts")
+end
+
+function M.assetsRoot(config)
+	return M.joinPath(config.clientRoot, "assets")
+end
+
 function M.readFile(path)
 	local file = io.open(path, "rb")
 	if not file then
@@ -459,7 +467,8 @@ local function collectScriptsRecursive(state, root, relativePath)
 end
 
 function M.discoverScripts(state)
-	local root = state.config.clientRoot
+	pcall(os.createDirectory, state.config.clientRoot)
+	local root = M.scriptsRoot(state.config)
 	pcall(os.createDirectory, root)
 
 	state.scripts = {}
@@ -564,7 +573,10 @@ local function collectAssetFilesRecursive(state, root, syncRootPrefix, relativeP
 			end
 
 			local fullPath = M.joinPath(root, relPath)
-			local syncPath = M.joinPath(syncRootPrefix, relPath)
+			local syncPath = relPath
+			if syncRootPrefix ~= "" then
+				syncPath = M.joinPath(syncRootPrefix, relPath)
+			end
 			if M.isSafeAssetSyncPath(syncPath) then
 				local shouldSkip = shouldSkipBundledModelCmo(syncPath)
 				if not shouldSkip then
@@ -594,14 +606,10 @@ function M.discoverAssetFiles(state)
 	local normalizedLevel = M.normalizeLoadedLevel(server and server.loadedLevel or nil)
 	state.loadedLevel = normalizedLevel
 
-	if normalizedLevel ~= "" and not isDefaultGameMapName(normalizedLevel) then
-		local levelSyncRoot = "data/" .. normalizedLevel
-		collectAssetFilesRecursive(state, levelSyncRoot, levelSyncRoot, "")
-	end
-
-	-- Global custom model assets used by modes/plugins live under data/model.
-	collectAssetFilesRecursive(state, "data/model", "data/model", "")
-	collectAssetFilesRecursive(state, "texture", "texture", "")
+	pcall(os.createDirectory, state.config.clientRoot)
+	local root = M.assetsRoot(state.config)
+	pcall(os.createDirectory, root)
+	collectAssetFilesRecursive(state, root, "", "")
 
 	table.sort(state.assetFiles, function(a, b)
 		return a.path < b.path
