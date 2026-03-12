@@ -4,51 +4,18 @@ local log = require("main.src.log")
 local shared = require("main.src.shared")
 
 local M = {}
-local BASE64_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-local BASE64_ALPHABET = {}
+local BINARY_MAGIC = "SRCB"
 
-do
-	for i = 1, #BASE64_CHARS do
-		BASE64_ALPHABET[i - 1] = BASE64_CHARS:sub(i, i)
-	end
-end
-
-local function base64Encode(input)
-	if type(input) ~= "string" or #input == 0 then
-		return ""
+local function encodeBinaryFrame(frameType, payload)
+	if type(frameType) ~= "string" or frameType == "" then
+		return nil
 	end
 
-	local out = {}
-	local len = #input
-	local i = 1
-	while i <= len do
-		local a = string.byte(input, i) or 0
-		local b = string.byte(input, i + 1) or 0
-		local c = string.byte(input, i + 2) or 0
-
-		local n = a * 65536 + b * 256 + c
-		local v1 = math.floor(n / 262144) % 64
-		local v2 = math.floor(n / 4096) % 64
-		local v3 = math.floor(n / 64) % 64
-		local v4 = n % 64
-
-		out[#out + 1] = BASE64_ALPHABET[v1]
-		out[#out + 1] = BASE64_ALPHABET[v2]
-		if i + 1 <= len then
-			out[#out + 1] = BASE64_ALPHABET[v3]
-		else
-			out[#out + 1] = "="
-		end
-		if i + 2 <= len then
-			out[#out + 1] = BASE64_ALPHABET[v4]
-		else
-			out[#out + 1] = "="
-		end
-
-		i = i + 3
+	if type(payload) ~= "string" then
+		payload = ""
 	end
 
-	return table.concat(out)
+	return string.pack(">c4I2I4", BINARY_MAGIC, #frameType, #payload) .. frameType .. payload
 end
 
 local function parseMsgId(value)
@@ -315,10 +282,11 @@ local function pumpFileTransfer(state, connection)
 		end
 
 		if type(chunkOrErr) == "string" and #chunkOrErr > 0 then
-			if not enqueueFrame(state, connection, "FILE_CHUNK", {
-				path = transfer.path,
-				dataB64 = base64Encode(chunkOrErr),
-			}) then
+			local binaryFrame = encodeBinaryFrame(
+				"FILE_CHUNK",
+				string.pack(">I2", #transfer.path) .. transfer.path .. chunkOrErr
+			)
+			if not binaryFrame or not enqueueBytes(state, connection, binaryFrame) then
 				return
 			end
 			sentChunks = sentChunks + 1
@@ -449,16 +417,31 @@ local function queueItemTypesSyncFrame(state, connection, payload)
 		return false
 	end
 
-	if type(payload.bin) ~= "string" or payload.bin == "" then
+	if type(payload.binRaw) ~= "string" or payload.binRaw == "" then
 		return false
 	end
 
-	if shared.eventPayloadSize(payload) > state.config.maxEventBytes then
+	local estimatedSize = 6 + (#payload.itemTypes * 4) + #payload.binRaw
+	if estimatedSize > state.config.maxEventBytes then
 		log.warn("item type sync payload too large; dropping")
 		return false
 	end
 
-	return enqueueFrame(state, connection, "ITEM_TYPES_SYNC", payload)
+	local segments = {
+		string.pack(">I2I2I2", payload.version or 1, payload.itemTypeSize or 0, #payload.itemTypes),
+	}
+	for i = 1, #payload.itemTypes do
+		local entry = payload.itemTypes[i]
+		segments[#segments + 1] = string.pack(">I2I2", entry.index or 0, entry.sourceIndex or 0)
+	end
+	segments[#segments + 1] = payload.binRaw
+
+	local binaryFrame = encodeBinaryFrame("ITEM_TYPES_SYNC", table.concat(segments))
+	if not binaryFrame then
+		return false
+	end
+
+	return enqueueBytes(state, connection, binaryFrame)
 end
 
 local function queueItemTypeModelFrame(state, connection, index, modelName)

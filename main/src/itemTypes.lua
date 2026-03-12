@@ -8,43 +8,6 @@ local MAX_ITEM_TYPE_COUNT = 255
 local MAX_ITEM_TYPE_INDEX = MAX_ITEM_TYPE_COUNT - 1
 local FIRST_CUSTOM_INDEX = 46
 
-local BASE64_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-local BASE64_ALPHABET = {}
-
-for i = 1, #BASE64_CHARS do
-	BASE64_ALPHABET[i - 1] = BASE64_CHARS:sub(i, i)
-end
-
-local function base64Encode(input)
-	if type(input) ~= "string" or #input == 0 then
-		return ""
-	end
-
-	local out = {}
-	local len = #input
-	local i = 1
-	while i <= len do
-		local a = string.byte(input, i) or 0
-		local b = string.byte(input, i + 1) or 0
-		local c = string.byte(input, i + 2) or 0
-
-		local n = a * 65536 + b * 256 + c
-		local v1 = math.floor(n / 262144) % 64
-		local v2 = math.floor(n / 4096) % 64
-		local v3 = math.floor(n / 64) % 64
-		local v4 = n % 64
-
-		out[#out + 1] = BASE64_ALPHABET[v1]
-		out[#out + 1] = BASE64_ALPHABET[v2]
-		out[#out + 1] = (i + 1 <= len) and BASE64_ALPHABET[v3] or "="
-		out[#out + 1] = (i + 2 <= len) and BASE64_ALPHABET[v4] or "="
-
-		i = i + 3
-	end
-
-	return table.concat(out)
-end
-
 local function safeRead(obj, key)
 	local ok, value = pcall(function()
 		return obj[key]
@@ -281,10 +244,9 @@ local function buildSyncPayload(state)
 
 	return {
 		version = PROTOCOL_VERSION,
-		encoding = "base64",
 		itemTypeSize = ITEM_TYPE_SIZE,
 		itemTypes = metadata,
-		bin = base64Encode(rawBlob),
+		binRaw = rawBlob,
 	}
 end
 
@@ -301,7 +263,7 @@ local function emitSyncPayload(src, payload, player)
 		return false
 	end
 
-	if type(payload.bin) ~= "string" or payload.bin == "" then
+	if type(payload.binRaw) ~= "string" or payload.binRaw == "" then
 		return false
 	end
 
