@@ -439,6 +439,25 @@ local function runInitItemTypeHook(state, src)
 	broadcastCustomItemTypes(state, src)
 end
 
+local function normalizeFireSoundPaths(soundPaths)
+	if type(soundPaths) == "string" then
+		assert(soundPaths ~= "", "src.setItemTypeFireSounds: sound path must be non-empty")
+		return { soundPaths }
+	end
+
+	assert(type(soundPaths) == "table", "src.setItemTypeFireSounds: soundPaths must be string or table")
+
+	local normalized = {}
+	for i = 1, #soundPaths do
+		local path = soundPaths[i]
+		assert(type(path) == "string" and path ~= "",
+			"src.setItemTypeFireSounds: every sound path must be a non-empty string")
+		normalized[#normalized + 1] = path
+	end
+
+	return normalized
+end
+
 function M.install(state, src)
 	if state.itemTypesAPIInstalled then
 		return
@@ -453,6 +472,7 @@ function M.install(state, src)
 	state.nextCustomItemTypeIndex = state.nextCustomItemTypeIndex or FIRST_CUSTOM_INDEX
 	state.itemTypeModelAssignments = state.itemTypeModelAssignments or {}
 	state.itemTypeIconAssignments = state.itemTypeIconAssignments or {}
+	state.itemTypeFireSoundAssignments = state.itemTypeFireSoundAssignments or {}
 	state.buildCustomItemTypesSyncPayload = function()
 		return buildSyncPayload(state)
 	end
@@ -510,6 +530,29 @@ function M.install(state, src)
 				state.itemTypeIconAssignments[targetIndex] = iconPath
 				local network = require("main.src.network")
 				return network.sendItemTypeIcon(state, player, targetIndex, iconPath)
+			end
+		end
+
+		if type(src.setItemTypeFireSounds) ~= "function" then
+			src.setItemTypeFireSounds = function(indexOrType, soundPaths, player)
+				local targetIndex = getItemTypeIndex(indexOrType)
+				assert(type(targetIndex) == "number",
+					"src.setItemTypeFireSounds(indexOrItemType, soundPaths, player?): first arg must be number or ItemType")
+
+				assert(targetIndex >= 0 and targetIndex <= MAX_ITEM_TYPE_INDEX,
+					"src.setItemTypeFireSounds: index out of range")
+
+				if player ~= nil then
+					assert(type(player) == "userdata" and player.class == "Player",
+						"src.setItemTypeFireSounds: player must be Player or nil")
+					assert(not player.isBot, "src.setItemTypeFireSounds: player cannot be a bot")
+				end
+
+				local normalizedSoundPaths = normalizeFireSoundPaths(soundPaths)
+				state.itemTypeFireSoundAssignments[targetIndex] = normalizedSoundPaths
+
+				local network = require("main.src.network")
+				return network.sendItemTypeFireSounds(state, player, targetIndex, normalizedSoundPaths)
 			end
 		end
 	end

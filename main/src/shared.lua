@@ -116,6 +116,7 @@ function M.getState()
 		itemTypeInitHookRan = false,
 		itemTypeModelAssignments = {},
 		itemTypeIconAssignments = {},
+		itemTypeFireSoundAssignments = {},
 		buildCustomItemTypesSyncPayload = nil,
 	}
 
@@ -320,7 +321,7 @@ end
 
 local function hasSafeAssetExtension(path)
 	local ext = fileExtension(path)
-	return ext == ".csx" or ext == ".sbc" or ext == ".sbl" or ext == ".cmo" or ext == ".png"
+	return ext == ".csx" or ext == ".sbc" or ext == ".sbl" or ext == ".cmo" or ext == ".png" or ext == ".wav"
 end
 
 function M.isSafeSyncPath(path)
@@ -387,12 +388,18 @@ function M.isSafeAssetSyncPath(path)
 
 	local isDataPath = lowerPath:sub(1, 5) == "data/"
 	local isTexturePath = lowerPath:sub(1, 8) == "texture/"
-	if not isDataPath and not isTexturePath then
+	local isSoundPath = lowerPath:sub(1, 6) == "sound/"
+	if not isDataPath and not isTexturePath and not isSoundPath then
 		return false
 	end
 
 	-- Texture sync is PNG-only and explicit denylist protected above.
 	if isTexturePath and fileExtension(lowerPath) ~= ".png" then
+		return false
+	end
+
+	-- Sound sync is WAV-only and rooted under sound/.
+	if isSoundPath and fileExtension(lowerPath) ~= ".wav" then
 		return false
 	end
 

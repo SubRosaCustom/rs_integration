@@ -485,6 +485,22 @@ local function queueItemTypeIconFrame(state, connection, index, iconPath)
 	})
 end
 
+local function queueItemTypeFireSoundsFrame(state, connection, index, soundPaths)
+	local client = state.clients[connection]
+	if not client or not connection.isOpen or not client.hello then
+		return false
+	end
+
+	if type(soundPaths) ~= "table" then
+		return false
+	end
+
+	return enqueueFrame(state, connection, "ITEM_TYPE_FIRE_SOUNDS", {
+		index = index,
+		fireSounds = soundPaths,
+	})
+end
+
 local function acknowledgeEvent(state, connection, msgID)
 	if not msgID then
 		return
@@ -540,6 +556,13 @@ local function handleFrame(state, connection, frame)
 					if type(iconAssignments) == "table" then
 						for idx, iconPath in pairs(iconAssignments) do
 							queueItemTypeIconFrame(state, connection, idx, iconPath)
+						end
+					end
+
+					local fireSoundAssignments = state.itemTypeFireSoundAssignments
+					if type(fireSoundAssignments) == "table" then
+						for idx, soundPaths in pairs(fireSoundAssignments) do
+							queueItemTypeFireSoundsFrame(state, connection, idx, soundPaths)
 						end
 					end
 				end
@@ -985,6 +1008,40 @@ end
 
 function M.sendItemTypeIconToConnection(state, connection, index, iconPath)
 	return queueItemTypeIconFrame(state, connection, index, iconPath)
+end
+
+function M.sendItemTypeFireSounds(state, player, index, soundPaths)
+	if player == nil then
+		local sent = 0
+		for connection, client in pairs(state.clients) do
+			local ply = connection.player
+			if connection.isOpen and client.hello and (not ply or not ply.isBot) then
+				if queueItemTypeFireSoundsFrame(state, connection, index, soundPaths) then
+					sent = sent + 1
+				end
+			end
+		end
+		return sent
+	end
+
+	if type(player) ~= "userdata" or player.class ~= "Player" then
+		return false
+	end
+
+	if player.isBot then
+		return false
+	end
+
+	local connection = player.connection
+	if not connection then
+		return false
+	end
+
+	return queueItemTypeFireSoundsFrame(state, connection, index, soundPaths)
+end
+
+function M.sendItemTypeFireSoundsToConnection(state, connection, index, soundPaths)
+	return queueItemTypeFireSoundsFrame(state, connection, index, soundPaths)
 end
 
 
