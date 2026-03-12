@@ -1,120 +1,75 @@
 # Sub Rosa: Custom RS Integration
 
-The RosaServer-side bridge for Sub Rosa: Custom.
+`rs_integration` is the server-side integration layer for SRC on RosaServer.
 
-This repository plugs into a `RosaServer` / `RosaServerCore` server and handles:
+If you want client-side modding support or SRC-enabled clients at all, this repository is required. It plugs into RosaServer, exposes the SRC networking/runtime helpers on the server, and delivers scripts/assets/client metadata to connected SRC clients.
 
-- SRC TCP handshake
-- script index delivery
-- file and asset sync
-- client/server event transport
-- custom item type replication
-- custom item model/icon/fire-sound replication
+## What It Does
 
-In practical terms, this is the server half of the SRCC sync protocol.
+`rs_integration` is responsible for:
 
-Requires:
+- exposing the SRC server runtime inside RosaServer
+- accepting and managing SRC TCP client connections
+- sending script indexes and file chunks
+- syncing client assets from `clientRoot`
+- bridging client/server custom events
+- syncing custom item types and related metadata
+- refreshing synced client content during development
 
-- [RosaServer](https://github.com/jpxs-intl/RosaServer)
-- typically [RosaServerCore](https://github.com/jpxs-intl/RosaServerCore)
-- [Sub Rosa: Custom Client](https://github.com/SubRosaCustom/client) on the connecting clients
+This repository is the server half of SRC. It is not the native client mod, and it is not the standard client Lua implementation.
 
-# Getting Started
+## Why It Matters
 
-## Layout
+There is no serious SRC deployment without `rs_integration`.
 
-- `main/src/init.lua` is the entrypoint
-- `main/src/network.lua` owns the TCP protocol and frame handling
-- `main/src/shared.lua` owns config/state/discovery helpers
-- `main/src/watcher.lua` owns auto-refresh file watching
+It is the piece that enables:
+
+- client-side scripting delivered from the server
+- synced client assets
+- SRC handshake/state management
+- server-driven custom item/client metadata sync
+
+Without it, RosaServer does not know how to talk to the SRC client mod.
+
+## Project Layout
+
+- `main/src/init.lua` installs the SRC runtime into the server
+- `main/src/network.lua` owns the protocol and connection lifecycle
+- `main/src/shared.lua` owns config, paths, and shared state
 - `main/src/itemTypes.lua` owns custom item type sync helpers
-- `plugins/srccShowcase.lua` is the local example plugin
+- `main/src/watcher.lua` owns optional auto-refresh support
+- `plugins/srccShowcase.lua` is an example server plugin
 
 ## Configuration
 
-This module reads from `config.src` inside the main RosaServer Lua config.
+This module is configured through `config.src` in the server's Lua config.
 
-Current config fields include:
+Common settings include:
 
 - `enabled`
-- `disallowNonSRCPlayers`
 - `clientRoot`
-- `readSize`
-- `fileChunkSize`
-- `maxReadBytesPerTick`
-- `maxSendBytesPerTick`
-- `maxFileChunksPerTick`
-- `maxQueuedSendFrames`
-- `autoRefreshEnabled`
-- `autoRefreshDebounceTicks`
-- `eventRetryBaseTicks`
-- `eventRetryMaxAttempts`
-- `maxEventBytes`
-- `eventProcessTimeoutTicks`
-- `eventDebugLogSuccess`
+- `disallowNonSRCPlayers`
+- file transfer limits
+- queue limits
+- auto-refresh settings
+- event retry/timeout settings
 
-If `enabled = false`, the runtime shuts itself down cleanly.
+`clientRoot` is the server-side directory tree that gets indexed and synced to SRC clients.
 
-## What Gets Synced
+## Runtime Role
 
-From `clientRoot`:
+At runtime, `rs_integration` sits in the RosaServer process and delivers the client-side runtime to SRC players.
 
-- Lua scripts
-- custom assets under safe paths
-- custom item type blobs
-- custom item models
-- custom item icons
-- custom item fire sound assignments
+That typically means:
 
-Safe asset roots are intentionally constrained. Right now the integration is built for SRCC’s expected paths such as:
+- `client` is installed on the player's machine
+- `rs_integration` runs on the server
+- `core` and other synced client files live under `clientRoot`
+- the server syncs those files to the client during join/resync
 
-- `data/...`
-- `texture/...`
-- `sound/...`
+## Related Repositories
 
-# API Surface
-
-The module installs helpers onto global `src`.
-
-Notable functions:
-
-- `src.refresh()`
-- `src.onClientEvent(name, fn)`
-- `src.emitClientEvent(player, name, data, bin)`
-- `src.syncClientItemTypes(player, payload)`
-- `src.setItemTypeModel(indexOrItemType, modelName, player?)`
-- `src.setItemTypeIcon(indexOrItemType, iconPath, player?)`
-- `src.setItemTypeFireSounds(indexOrItemType, soundPaths, player?)`
-- `src.getClientState(player)`
-- `src.listScripts()`
-
-Custom item helpers are installed out of `main/src/itemTypes.lua`.
-
-# Operational Notes
-
-## Refreshing
-
-The integration supports manual refresh through:
-
-- `src.refresh()`
-- `/srcrefresh`
-
-It also supports optional auto-refresh through the watcher.
-
-## Join Gating
-
-This repo only provides the server side. Initial join blocking, sync overlays, and client resume behavior are owned by `client/`.
-
-## Binary Transport
-
-Heavy server-to-client sync payloads are already moved off JSON where it materially helps. That includes raw file chunks and custom item type blobs. Control traffic is still JSON on purpose.
-
-# Scope
-
-This repo is not RosaServerCore and it is not the SRCC client.
-
-- It does not own native hooks.
-- It does not own the client Lua runtime.
-- It does not replace RosaServer gameplay logic.
-
-It exists to connect RosaServer to SRCC clients without bolting sync logic all over your actual gamemode code.
+- [`client`](https://github.com/SubRosaCustom/client): the native SRC client mod
+- [`core`](https://github.com/SubRosaCustom/core): optional standard client-side Lua implementation typically synced through this repo
+- [`RosaServer`](https://github.com/jpxs-intl/RosaServer): upstream dedicated server
+- [`RosaServerCore`](https://github.com/jpxs-intl/RosaServerCore): upstream standard server Lua framework
