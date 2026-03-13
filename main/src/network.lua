@@ -100,7 +100,7 @@ local function getPlayerConnection(state, player)
 		end
 
 		for connection, client in pairs(state.clients) do
-			if client and connection and connection.player == player then
+			if client and connection and client.player == player then
 				return connection
 			end
 		end
