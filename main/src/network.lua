@@ -1063,7 +1063,7 @@ end
 function M.refresh(state)
 	for connection, client in pairs(state.clients) do
 		if connection.isOpen and client.hello then
-			enqueueFrame(state, connection, "REFRESH_NOTICE", {})
+			enqueueFrame(state, connection, "SYNC_APPLY", {})
 		end
 	end
 end
