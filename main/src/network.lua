@@ -89,8 +89,8 @@ local function logEventResult(state, connection, name, msgId, payload)
 	end
 end
 
-local function getPlayerConnection(player)
-	if not player then
+local function getPlayerConnection(state, player)
+	if not state or not player then
 		return nil
 	end
 
@@ -98,7 +98,12 @@ local function getPlayerConnection(player)
 		if player.isBot then
 			return nil
 		end
-		return player.connection
+
+		for connection, client in pairs(state.clients) do
+			if client and connection and connection.player == player then
+				return connection
+			end
+		end
 	end
 
 	return nil
@@ -907,7 +912,7 @@ function M.emitClientEvent(state, player, name, data, bin)
 		return false
 	end
 
-	local connection = player.connection
+	local connection = getPlayerConnection(state, player)
 	if not connection then
 		return false
 	end
@@ -941,7 +946,7 @@ function M.syncClientItemTypes(state, player, payload)
 		return false
 	end
 
-	local connection = player.connection
+	local connection = getPlayerConnection(state, player)
 	if not connection then
 		return false
 	end
@@ -983,7 +988,7 @@ function M.sendItemTypeIcon(state, player, index, iconPath)
 		return false
 	end
 
-	local connection = player.connection
+	local connection = getPlayerConnection(state, player)
 	if not connection then
 		return false
 	end
@@ -1017,7 +1022,7 @@ function M.sendItemTypeFireSounds(state, player, index, soundPaths)
 		return false
 	end
 
-	local connection = player.connection
+	local connection = getPlayerConnection(state, player)
 	if not connection then
 		return false
 	end
@@ -1052,7 +1057,7 @@ function M.sendItemTypeModel(state, player, index, modelName)
 		return false
 	end
 
-	local connection = player.connection
+	local connection = getPlayerConnection(state, player)
 	if not connection then
 		return false
 	end
@@ -1083,7 +1088,7 @@ function M.shutdown(state)
 end
 
 function M.getPlayerConnection(player)
-	return getPlayerConnection(player)
+	return getPlayerConnection(state, player)
 end
 
 return M
