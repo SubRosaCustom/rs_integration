@@ -109,6 +109,69 @@ local function getPlayerConnection(state, player)
 	return nil
 end
 
+local function resolveClientPlayer(state, connection, helloPayload)
+	if not state or not connection or type(helloPayload) ~= "table" then
+		return nil
+	end
+
+	local helloPhoneNumber = tonumber(helloPayload.phone_number or helloPayload.phoneNumber) or 0
+	local helloAccountID = tonumber(helloPayload.account_id or helloPayload.accountID) or 0
+	local helloPlayerName = type(helloPayload.player_name) == "string" and helloPayload.player_name
+		or type(helloPayload.playerName) == "string" and helloPayload.playerName
+		or ""
+
+	local bestPlayer = nil
+	local bestScore = -1
+	local duplicateBest = false
+	local remoteAddress = tostring(connection.address)
+
+	for _, player in ipairs(players.getNonBots()) do
+		if not player.isBot then
+			local score = 0
+
+			if helloPhoneNumber > 0 and tonumber(player.phoneNumber) == helloPhoneNumber then
+				score = score + 100
+			end
+
+			if helloAccountID > 0 and tonumber(player.accountID) == helloAccountID then
+				score = score + 100
+			end
+
+			if helloPlayerName ~= "" and tostring(player.name) == helloPlayerName then
+				score = score + 10
+			end
+
+			if player.connection and tostring(player.connection.address) == remoteAddress then
+				score = score + 1
+			end
+
+			if score > bestScore then
+				bestPlayer = player
+				bestScore = score
+				duplicateBest = false
+			elseif score > 0 and score == bestScore then
+				duplicateBest = true
+			end
+		end
+	end
+
+	if duplicateBest or bestScore <= 0 then
+		return nil
+	end
+
+	return bestPlayer
+end
+
+local function refreshClientPlayerBinding(state, connection, client)
+	if not client or client.hello ~= true then
+		return nil
+	end
+
+	local player = resolveClientPlayer(state, connection, client.helloPayload)
+	client.player = player
+	return player
+end
+
 local function clearClientState(state, connection)
 	local client = state.clients[connection]
 	if client and client.activeFileTransfer and client.activeFileTransfer.file then
@@ -520,7 +583,10 @@ local function handleFrame(state, connection, frame)
 	end
 
 	if frameType == "HELLO" then
-		state.clients[connection].hello = true
+		local client = state.clients[connection]
+		client.hello = true
+		client.helloPayload = payload
+		client.player = resolveClientPlayer(state, connection, payload)
 		enqueueFrame(state, connection, "HELLO_ACK", {
 			protocol = 1,
 			port = server.port,
@@ -807,6 +873,8 @@ local function acceptConnections(state)
 			pendingFileRequests = {},
 			activeFileTransfer = nil,
 			hello = false,
+			helloPayload = nil,
+			player = nil,
 			pendingEvents = {},
 			awaitingResults = {},
 			earlyResults = {},
@@ -818,7 +886,11 @@ local function acceptConnections(state)
 end
 
 local function processClients(state)
-	for connection, _ in pairs(state.clients) do
+	for connection, client in pairs(state.clients) do
+		if connection.isOpen and client then
+			refreshClientPlayerBinding(state, connection, client)
+		end
+
 		if connection.isOpen then
 			processClientReads(state, connection)
 			processPendingRetries(state, connection)
@@ -1089,6 +1161,15 @@ end
 
 function M.getPlayerConnection(player)
 	return getPlayerConnection(state, player)
+end
+
+function M.getConnectionPlayer(state, connection)
+	local client = state and state.clients and state.clients[connection] or nil
+	if not client then
+		return nil
+	end
+
+	return client.player or refreshClientPlayerBinding(state, connection, client)
 end
 
 return M

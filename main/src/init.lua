@@ -103,6 +103,10 @@ function src.getClientState(player)
 	}
 end
 
+function src.getClientPlayer(connection)
+	return network.getConnectionPlayer(state, connection)
+end
+
 function src.listScripts()
 	return shared.discoverScripts(state)
 end
