@@ -109,54 +109,22 @@ local function getPlayerConnection(state, player)
 	return nil
 end
 
-local function resolveClientPlayer(state, connection, helloPayload)
-	if not state or not connection or type(helloPayload) ~= "table" then
+local function resolveClientPlayer(_, connection)
+	if not connection then
 		return nil
 	end
 
-	local helloPhoneNumber = tonumber(helloPayload.phone_number or helloPayload.phoneNumber) or 0
-	local helloAccountID = tonumber(helloPayload.account_id or helloPayload.accountID) or 0
-	local helloPlayerName = type(helloPayload.player_name) == "string" and helloPayload.player_name
-		or type(helloPayload.playerName) == "string" and helloPayload.playerName
-		or ""
-
 	local bestPlayer = nil
-	local bestScore = -1
-	local duplicateBest = false
 	local remoteAddress = tostring(connection.address)
 
 	for _, player in ipairs(players.getNonBots()) do
-		if not player.isBot then
-			local score = 0
-
-			if helloPhoneNumber > 0 and tonumber(player.phoneNumber) == helloPhoneNumber then
-				score = score + 100
+		if not player.isBot and player.connection and tostring(player.connection.address) == remoteAddress then
+			if bestPlayer ~= nil then
+				return nil
 			end
 
-			if helloAccountID > 0 and tonumber(player.accountID) == helloAccountID then
-				score = score + 100
-			end
-
-			if helloPlayerName ~= "" and tostring(player.name) == helloPlayerName then
-				score = score + 10
-			end
-
-			if player.connection and tostring(player.connection.address) == remoteAddress then
-				score = score + 1
-			end
-
-			if score > bestScore then
-				bestPlayer = player
-				bestScore = score
-				duplicateBest = false
-			elseif score > 0 and score == bestScore then
-				duplicateBest = true
-			end
+			bestPlayer = player
 		end
-	end
-
-	if duplicateBest or bestScore <= 0 then
-		return nil
 	end
 
 	return bestPlayer
