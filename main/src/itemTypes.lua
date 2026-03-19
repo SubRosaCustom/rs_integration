@@ -403,8 +403,24 @@ end
 
 local function normalizeFireSoundPaths(soundPaths)
 	if type(soundPaths) == "string" then
-		assert(soundPaths ~= "", "src.setItemTypeFireSounds: sound path must be non-empty")
-		return { soundPaths }
+		assert(soundPaths ~= "", "src.setItemTypeFireSounds: sound ref must be non-empty")
+		local trimmed = soundPaths:match("^%s*(.-)%s*$")
+		assert(trimmed ~= "", "src.setItemTypeFireSounds: sound ref must be non-empty")
+
+		local lowered = string.lower(trimmed)
+		if lowered:find("/", 1, true) or lowered:find("\\", 1, true) or lowered:match("%.wav$") then
+			return {
+				kind = "files",
+				files = { trimmed },
+			}
+		end
+
+		local builtin = lowered:gsub("%.wav$", "")
+		assert(builtin ~= "", "src.setItemTypeFireSounds: builtin sound ref must be non-empty")
+		return {
+			kind = "builtin",
+			builtin = builtin,
+		}
 	end
 
 	assert(type(soundPaths) == "table", "src.setItemTypeFireSounds: soundPaths must be string or table")
@@ -417,7 +433,41 @@ local function normalizeFireSoundPaths(soundPaths)
 		normalized[#normalized + 1] = path
 	end
 
-	return normalized
+	assert(#normalized <= 6, "src.setItemTypeFireSounds: maximum 6 custom sound paths")
+
+	return {
+		kind = "files",
+		files = normalized,
+	}
+end
+
+local BUILTIN_TEXTURE_NAMES = {
+	gun_tex = true,
+	grenade = true,
+	soccerball = true,
+	watermelon = true,
+	tex_2 = true,
+}
+
+local function normalizeTextureAssignment(textureRef)
+	assert(type(textureRef) == "string" and textureRef ~= "", "src.setItemTypeTexture: texture ref must be a non-empty string")
+
+	local trimmed = textureRef:match("^%s*(.-)%s*$")
+	assert(trimmed ~= "", "src.setItemTypeTexture: texture ref must be non-empty")
+
+	local fileName = trimmed:match("([^/\\]+)$") or trimmed
+	local stem = string.lower(fileName):gsub("%.png$", "")
+	if BUILTIN_TEXTURE_NAMES[stem] then
+		return {
+			kind = "builtin",
+			builtin = stem,
+		}
+	end
+
+	return {
+		kind = "file",
+		file = trimmed,
+	}
 end
 
 function M.install(state, src)
@@ -434,6 +484,7 @@ function M.install(state, src)
 	state.nextCustomItemTypeIndex = state.nextCustomItemTypeIndex or FIRST_CUSTOM_INDEX
 	state.itemTypeModelAssignments = state.itemTypeModelAssignments or {}
 	state.itemTypeIconAssignments = state.itemTypeIconAssignments or {}
+	state.itemTypeTextureAssignments = state.itemTypeTextureAssignments or {}
 	state.itemTypeFireSoundAssignments = state.itemTypeFireSoundAssignments or {}
 	state.buildCustomItemTypesSyncPayload = function()
 		return buildSyncPayload(state)
@@ -492,6 +543,27 @@ function M.install(state, src)
 				state.itemTypeIconAssignments[targetIndex] = iconPath
 				local network = require("main.src.network")
 				return network.sendItemTypeIcon(state, player, targetIndex, iconPath)
+			end
+		end
+
+		if type(src.setItemTypeTexture) ~= "function" then
+			src.setItemTypeTexture = function(indexOrType, textureRef, player)
+				local targetIndex = getItemTypeIndex(indexOrType)
+				assert(type(targetIndex) == "number",
+					"src.setItemTypeTexture(indexOrItemType, textureRef, player?): first arg must be number or ItemType")
+
+				assert(targetIndex >= 0 and targetIndex <= MAX_ITEM_TYPE_INDEX, "src.setItemTypeTexture: index out of range")
+
+				if player ~= nil then
+					assert(type(player) == "userdata" and player.class == "Player", "src.setItemTypeTexture: player must be Player or nil")
+					assert(not player.isBot, "src.setItemTypeTexture: player cannot be a bot")
+				end
+
+				local normalizedTexture = normalizeTextureAssignment(textureRef)
+				state.itemTypeTextureAssignments[targetIndex] = normalizedTexture
+
+				local network = require("main.src.network")
+				return network.sendItemTypeTexture(state, player, targetIndex, normalizedTexture)
 			end
 		end
 

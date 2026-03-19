@@ -93,6 +93,8 @@ function M.getState()
 		runtimeActive = false,
 		hooksRegistered = false,
 		moduleLoaded = false,
+		runtimeID = tostring(os.realClock and os.realClock() or os.clock()),
+		syncGeneration = 1,
 		tcpBindInProgress = false,
 		tick = 0,
 		nextEventID = 1,
@@ -116,6 +118,7 @@ function M.getState()
 		itemTypeInitHookRan = false,
 		itemTypeModelAssignments = {},
 		itemTypeIconAssignments = {},
+		itemTypeTextureAssignments = {},
 		itemTypeFireSoundAssignments = {},
 		buildCustomItemTypesSyncPayload = nil,
 	}

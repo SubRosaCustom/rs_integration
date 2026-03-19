@@ -6,6 +6,28 @@ local shared = require("main.src.shared")
 local M = {}
 local BINARY_MAGIC = "SRCB"
 
+local function parsePositiveInteger(value)
+	if type(value) == "number" then
+		local num = math.floor(value)
+		if num > 0 then
+			return num
+		end
+		return nil
+	end
+
+	if type(value) == "string" and value ~= "" then
+		local parsed = tonumber(value)
+		if parsed then
+			local num = math.floor(parsed)
+			if num > 0 then
+				return num
+			end
+		end
+	end
+
+	return nil
+end
+
 local function encodeBinaryFrame(frameType, payload)
 	if type(frameType) ~= "string" or frameType == "" then
 		return nil
@@ -109,44 +131,131 @@ local function getPlayerConnection(state, player)
 	return nil
 end
 
-local function resolveClientPlayer(_, connection)
+local function resolveClientPlayerFromHello(_, connection, payload)
 	if not connection then
-		return nil
+		return nil, "missing_connection"
+	end
+
+	if type(payload) ~= "table" then
+		return nil, "invalid_hello_payload"
+	end
+
+	local phoneNumber = parsePositiveInteger(payload.phoneNumber or payload.phone)
+	local subRosaID = parsePositiveInteger(payload.subRosaID or payload.subrosaID or payload.subrosa_id)
+	if not phoneNumber or not subRosaID then
+		return nil, "missing_bind_claims"
 	end
 
 	local bestPlayer = nil
 	local remoteAddress = tostring(connection.address)
 
 	for _, player in ipairs(players.getNonBots()) do
-		if not player.isBot and player.connection and tostring(player.connection.address) == remoteAddress then
+		if not player.isBot
+			and player.connection
+			and tostring(player.connection.address) == remoteAddress
+			and tonumber(player.phoneNumber) == phoneNumber
+			and tonumber(player.subRosaID) == subRosaID then
 			if bestPlayer ~= nil then
-				return nil
+				return nil, "ambiguous_bind_claims"
 			end
 
 			bestPlayer = player
 		end
 	end
 
-	return bestPlayer
-end
-
-local function refreshClientPlayerBinding(state, connection, client)
-	if not client or client.hello ~= true then
-		return nil
+	if not bestPlayer then
+		return nil, "no_matching_player"
 	end
 
-	local player = resolveClientPlayer(state, connection, client.helloPayload)
-	client.player = player
-	return player
+	return bestPlayer, nil
 end
 
-local function clearClientState(state, connection)
-	local client = state.clients[connection]
+local function closeClientTransfer(client)
 	if client and client.activeFileTransfer and client.activeFileTransfer.file then
 		pcall(function()
 			client.activeFileTransfer.file:close()
 		end)
 	end
+	if client then
+		client.activeFileTransfer = nil
+	end
+end
+
+local function resetClientSyncState(client)
+	if not client then
+		return
+	end
+
+	closeClientTransfer(client)
+	client.pendingFileRequests = {}
+	client.pendingEvents = {}
+	client.awaitingResults = {}
+	client.earlyResults = {}
+	client.recentCompleted = {}
+	client.sendQueue = {}
+	client.sendOffset = 1
+end
+
+local function validateBoundPlayer(connection, client)
+	if not connection or not client or not client.player then
+		return nil
+	end
+
+	local player = client.player
+	if player.isBot or not player.connection then
+		client.player = nil
+		client.bound = false
+		return nil
+	end
+
+	if tostring(player.connection.address) ~= tostring(connection.address) then
+		client.player = nil
+		client.bound = false
+		return nil
+	end
+
+	if client.helloPayload then
+		local phoneNumber = parsePositiveInteger(client.helloPayload.phoneNumber or client.helloPayload.phone)
+		local subRosaID =
+			parsePositiveInteger(client.helloPayload.subRosaID or client.helloPayload.subrosaID or client.helloPayload.subrosa_id)
+		if phoneNumber and tonumber(player.phoneNumber) ~= phoneNumber then
+			client.player = nil
+			client.bound = false
+			return nil
+		end
+		if subRosaID and tonumber(player.subRosaID) ~= subRosaID then
+			client.player = nil
+			client.bound = false
+			return nil
+		end
+	end
+
+	return player
+end
+
+local function disconnectOtherConnectionsForPlayer(state, player, exceptConnection)
+	if not player then
+		return
+	end
+
+	for connection, client in pairs(state.clients) do
+		if connection ~= exceptConnection and client and client.player == player then
+			resetClientSyncState(client)
+			client.closeAfterFlush = true
+		end
+	end
+end
+
+local function nextSyncGeneration(state)
+	local current = tonumber(state.syncGeneration) or 0
+	current = current + 1
+	state.syncGeneration = current
+	return current
+end
+
+local function clearClientState(state, connection)
+	local client = state.clients[connection]
+	closeClientTransfer(client)
 	state.clients[connection] = nil
 end
 
@@ -202,6 +311,10 @@ local function flushSendQueue(state, connection)
 		else
 			break
 		end
+	end
+
+	if client.closeAfterFlush and #client.sendQueue == 0 and connection.isOpen then
+		connection:close()
 	end
 end
 
@@ -506,20 +619,54 @@ local function queueItemTypeIconFrame(state, connection, index, iconPath)
 	})
 end
 
-local function queueItemTypeFireSoundsFrame(state, connection, index, soundPaths)
+local function queueItemTypeTextureFrame(state, connection, index, textureAssignment)
 	local client = state.clients[connection]
 	if not client or not connection.isOpen or not client.hello then
 		return false
 	end
 
-	if type(soundPaths) ~= "table" then
+	if type(textureAssignment) ~= "table" then
 		return false
 	end
 
-	return enqueueFrame(state, connection, "ITEM_TYPE_FIRE_SOUNDS", {
+	local payload = {
 		index = index,
-		fireSounds = soundPaths,
-	})
+	}
+
+	if textureAssignment.kind == "builtin" then
+		payload.builtinTexture = textureAssignment.builtin
+	elseif textureAssignment.kind == "file" then
+		payload.texture = textureAssignment.file
+	else
+		return false
+	end
+
+	return enqueueFrame(state, connection, "ITEM_TYPE_TEXTURE", payload)
+end
+
+local function queueItemTypeFireSoundsFrame(state, connection, index, soundAssignment)
+	local client = state.clients[connection]
+	if not client or not connection.isOpen or not client.hello then
+		return false
+	end
+
+	if type(soundAssignment) ~= "table" then
+		return false
+	end
+
+	local payload = {
+		index = index,
+	}
+
+	if soundAssignment.kind == "builtin" then
+		payload.builtinFireSound = soundAssignment.builtin
+	elseif soundAssignment.kind == "files" then
+		payload.fireSounds = soundAssignment.files
+	else
+		return false
+	end
+
+	return enqueueFrame(state, connection, "ITEM_TYPE_FIRE_SOUNDS", payload)
 end
 
 local function acknowledgeEvent(state, connection, msgID)
@@ -552,12 +699,34 @@ local function handleFrame(state, connection, frame)
 
 	if frameType == "HELLO" then
 		local client = state.clients[connection]
+		local player, bindErr = resolveClientPlayerFromHello(state, connection, payload)
+		if not player then
+			log.warn("SRC bind rejected (%s): %s", shared.clientId(connection), tostring(bindErr))
+			resetClientSyncState(client)
+			client.hello = false
+			client.helloPayload = payload
+			client.player = nil
+			client.bound = false
+			enqueueFrame(state, connection, "ERROR_REPORT", {
+				code = "SRC_BIND_REJECTED",
+				error = tostring(bindErr),
+			})
+			client.closeAfterFlush = true
+			return
+		end
+
+		disconnectOtherConnectionsForPlayer(state, player, connection)
 		client.hello = true
 		client.helloPayload = payload
-		client.player = resolveClientPlayer(state, connection, payload)
+		client.player = player
+		client.bound = true
+		client.closeAfterFlush = false
+		client.generation = state.syncGeneration
 		enqueueFrame(state, connection, "HELLO_ACK", {
 			protocol = 1,
 			port = server.port,
+			runtimeID = state.runtimeID,
+			syncGeneration = state.syncGeneration,
 		})
 
 		local buildSyncPayload = state.buildCustomItemTypesSyncPayload
@@ -583,10 +752,17 @@ local function handleFrame(state, connection, frame)
 						end
 					end
 
+					local textureAssignments = state.itemTypeTextureAssignments
+					if type(textureAssignments) == "table" then
+						for idx, textureAssignment in pairs(textureAssignments) do
+							queueItemTypeTextureFrame(state, connection, idx, textureAssignment)
+						end
+					end
+
 					local fireSoundAssignments = state.itemTypeFireSoundAssignments
 					if type(fireSoundAssignments) == "table" then
-						for idx, soundPaths in pairs(fireSoundAssignments) do
-							queueItemTypeFireSoundsFrame(state, connection, idx, soundPaths)
+						for idx, soundAssignment in pairs(fireSoundAssignments) do
+							queueItemTypeFireSoundsFrame(state, connection, idx, soundAssignment)
 						end
 					end
 				end
@@ -598,6 +774,15 @@ local function handleFrame(state, connection, frame)
 	end
 
 	if frameType == "INDEX_REQ" then
+		local client = state.clients[connection]
+		if not client or not client.hello or not client.bound then
+			enqueueFrame(state, connection, "ERROR_REPORT", {
+				code = "SRC_BIND_REQUIRED",
+				error = "HELLO bind required before INDEX_REQ",
+			})
+			return
+		end
+
 		shared.discoverAssetFiles(state)
 		shared.discoverPersistentMode(state)
 		enqueueFrame(state, connection, "INDEX_RES", {
@@ -605,16 +790,36 @@ local function handleFrame(state, connection, frame)
 			assetFiles = state.assetFiles,
 			loadedLevel = state.loadedLevel,
 			persistentMode = state.persistentMode,
+			runtimeID = state.runtimeID,
+			syncGeneration = state.syncGeneration,
 		})
 		return
 	end
 
 	if frameType == "FILE_REQ" then
+		local client = state.clients[connection]
+		if not client or not client.hello or not client.bound then
+			enqueueFrame(state, connection, "ERROR_REPORT", {
+				code = "SRC_BIND_REQUIRED",
+				error = "HELLO bind required before FILE_REQ",
+			})
+			return
+		end
+
 		queueSyncFile(state, connection, payload.path)
 		return
 	end
 
 	if frameType == "EVENT" then
+		local client = state.clients[connection]
+		if not client or not client.hello or not client.bound then
+			enqueueFrame(state, connection, "ERROR_REPORT", {
+				code = "SRC_BIND_REQUIRED",
+				error = "HELLO bind required before EVENT",
+			})
+			return
+		end
+
 		if payload.dir == "c2s" then
 			local msgId = parseMsgId(payload.msgId)
 			acknowledgeEvent(state, connection, msgId)
@@ -843,10 +1048,13 @@ local function acceptConnections(state)
 			hello = false,
 			helloPayload = nil,
 			player = nil,
+			bound = false,
+			generation = 0,
 			pendingEvents = {},
 			awaitingResults = {},
 			earlyResults = {},
 			recentCompleted = {},
+			closeAfterFlush = false,
 		}
 
 		log.info("TCP client connected: %s", shared.clientId(connOrErr))
@@ -856,7 +1064,7 @@ end
 local function processClients(state)
 	for connection, client in pairs(state.clients) do
 		if connection.isOpen and client then
-			refreshClientPlayerBinding(state, connection, client)
+			validateBoundPlayer(connection, client)
 		end
 
 		if connection.isOpen then
@@ -1040,13 +1248,13 @@ function M.sendItemTypeIconToConnection(state, connection, index, iconPath)
 	return queueItemTypeIconFrame(state, connection, index, iconPath)
 end
 
-function M.sendItemTypeFireSounds(state, player, index, soundPaths)
+function M.sendItemTypeTexture(state, player, index, textureAssignment)
 	if player == nil then
 		local sent = 0
 		for connection, client in pairs(state.clients) do
 			local ply = connection.player
 			if connection.isOpen and client.hello and (not ply or not ply.isBot) then
-				if queueItemTypeFireSoundsFrame(state, connection, index, soundPaths) then
+				if queueItemTypeTextureFrame(state, connection, index, textureAssignment) then
 					sent = sent + 1
 				end
 			end
@@ -1067,11 +1275,45 @@ function M.sendItemTypeFireSounds(state, player, index, soundPaths)
 		return false
 	end
 
-	return queueItemTypeFireSoundsFrame(state, connection, index, soundPaths)
+	return queueItemTypeTextureFrame(state, connection, index, textureAssignment)
 end
 
-function M.sendItemTypeFireSoundsToConnection(state, connection, index, soundPaths)
-	return queueItemTypeFireSoundsFrame(state, connection, index, soundPaths)
+function M.sendItemTypeTextureToConnection(state, connection, index, textureAssignment)
+	return queueItemTypeTextureFrame(state, connection, index, textureAssignment)
+end
+
+function M.sendItemTypeFireSounds(state, player, index, soundAssignment)
+	if player == nil then
+		local sent = 0
+		for connection, client in pairs(state.clients) do
+			local ply = connection.player
+			if connection.isOpen and client.hello and (not ply or not ply.isBot) then
+				if queueItemTypeFireSoundsFrame(state, connection, index, soundAssignment) then
+					sent = sent + 1
+				end
+			end
+		end
+		return sent
+	end
+
+	if type(player) ~= "userdata" or player.class ~= "Player" then
+		return false
+	end
+
+	if player.isBot then
+		return false
+	end
+
+	local connection = getPlayerConnection(state, player)
+	if not connection then
+		return false
+	end
+
+	return queueItemTypeFireSoundsFrame(state, connection, index, soundAssignment)
+end
+
+function M.sendItemTypeFireSoundsToConnection(state, connection, index, soundAssignment)
+	return queueItemTypeFireSoundsFrame(state, connection, index, soundAssignment)
 end
 
 
@@ -1106,9 +1348,15 @@ function M.sendItemTypeModel(state, player, index, modelName)
 end
 
 function M.refresh(state)
+	local generation = nextSyncGeneration(state)
 	for connection, client in pairs(state.clients) do
 		if connection.isOpen and client.hello then
-			enqueueFrame(state, connection, "SYNC_APPLY", {})
+			resetClientSyncState(client)
+			client.generation = generation
+			enqueueFrame(state, connection, "REFRESH_NOTICE", {
+				runtimeID = state.runtimeID,
+				syncGeneration = generation,
+			})
 		end
 	end
 end
