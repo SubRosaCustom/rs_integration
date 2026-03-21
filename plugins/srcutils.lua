@@ -53,7 +53,7 @@ plugin.commands["/srcrefresh"] = {
 		assert(src.enabled, "SRC is disabled")
 		refreshNow()
 		local message = "SRC refresh queued for all connected clients"
-		ply:sendMessage(message)
+		messagePlayerWrap(ply, message)
 	end,
 }
 
