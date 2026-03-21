@@ -2,7 +2,6 @@
 local log = require("main.src.log")
 local shared = require("main.src.shared")
 local network = require("main.src.network")
-local watcher = require("main.src.watcher")
 local itemTypeSync = require("main.src.itemTypes")
 
 local state = shared.getState()
@@ -22,7 +21,6 @@ local function disableRuntime(reason)
 	state.enabled = false
 	state.runtimeActive = false
 	network.shutdown(state)
-	watcher.clear(state)
 	if reason then
 		log.info(reason)
 	end
@@ -47,7 +45,6 @@ local function applyConfig(isReload)
 
 	refreshNow()
 	network.ensureTcpServer(state)
-	watcher.ensure(state)
 
 	if not state.runtimeActive then
 		log.info("enabled")
@@ -60,6 +57,10 @@ end
 
 function src.refresh()
 	network.refresh(state)
+end
+
+function src.refreshSyncFiles()
+	refreshNow()
 end
 
 function src.onClientEvent(name, fn)
@@ -111,47 +112,6 @@ function src.listScripts()
 	return shared.discoverScripts(state)
 end
 
-local function ensureCommandRegistration()
-	if type(hook) ~= "table" or type(hook.plugins) ~= "table" then
-		log.warn("could not register /srcrefresh command (hook.plugins unavailable)")
-		return
-	end
-
-	local commandPluginName = "__main_src_commands"
-	local commandPlugin = hook.plugins[commandPluginName]
-
-	if not commandPlugin then
-		commandPlugin = {
-			name = "main.src.commands",
-			isEnabled = true,
-			hooks = {},
-			polyHooks = {},
-			commands = {},
-		}
-		hook.plugins[commandPluginName] = commandPlugin
-	end
-
-	commandPlugin.isEnabled = true
-	commandPlugin.hooks = commandPlugin.hooks or {}
-	commandPlugin.polyHooks = commandPlugin.polyHooks or {}
-	commandPlugin.commands = commandPlugin.commands or {}
-	commandPlugin.commands["/srcrefresh"] = {
-		info = "Refresh Sub Rosa Custom client scripts for all connected SRC clients.",
-		canCall = function(ply)
-			return ply.isConsole or ply.isAdmin
-		end,
-		call = function(ply)
-			refreshNow()
-			local message = "SRC refresh queued for all connected clients"
-			if ply and ply.sendMessage then
-				ply:sendMessage(message)
-			else
-				log.info(message)
-			end
-		end,
-	}
-end
-
 local function ensureNonSRCGateHook()
 	if type(hook) ~= "table" or type(hook.add) ~= "function" then
 		log.warn("could not register non-SRC gate hook (hook.add unavailable)")
@@ -178,7 +138,6 @@ local function ensureNonSRCGateHook()
 end
 
 if not state.hooksRegistered then
-	ensureCommandRegistration()
 	ensureNonSRCGateHook()
 
 	hook.add("ConfigLoaded", "main.src", function(isReload)
@@ -211,11 +170,6 @@ if not state.hooksRegistered then
 			log.info("loaded level changed to %s; sync refresh queued", state.loadedLevel ~= "" and state.loadedLevel or "<none>")
 		end
 
-		watcher.ensure(state)
-		watcher.process(state, function()
-			refreshNow()
-			log.info("auto-refresh queued")
-		end)
 		network.logicStep(state)
 	end)
 

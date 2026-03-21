@@ -37,7 +37,8 @@ Without it, RosaServer does not know how to talk to the SRC client mod.
 - `main/src/network.lua` owns the protocol and connection lifecycle
 - `main/src/shared.lua` owns config, paths, and shared state
 - `main/src/itemTypes.lua` owns custom item type sync helpers
-- `main/src/watcher.lua` owns optional auto-refresh support
+- `main/src/watcher.lua` owns the watcher helper used by SRC utility plugins
+- `plugins/srcutils.lua` owns `/srcrefresh` and optional auto-refresh behavior
 - `plugins/srccShowcase.lua` is an example server plugin
 
 ## Configuration
