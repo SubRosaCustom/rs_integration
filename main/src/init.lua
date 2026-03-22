@@ -173,6 +173,18 @@ if not state.hooksRegistered then
 		network.logicStep(state)
 	end)
 
+	hook.add("SendPacket", "main.src.udpSendPacket", function(address, port)
+		network.onSendPacket(state, address, port)
+	end)
+
+	hook.add("PostSendPacket", "main.src.udpPostSendPacket", function()
+		network.onPostSendPacket(state)
+	end)
+
+	hook.add("PostPacketReceive", "main.src.udpPostPacketReceive", function()
+		network.onPostPacketReceive(state)
+	end)
+
 	hook.add("InterruptSignal", "main.src", function()
 		disableRuntime("interrupt signal received")
 	end)
