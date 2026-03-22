@@ -102,6 +102,8 @@ function M.getState()
 		boundPort = nil,
 		clients = {},
 		eventHandlers = {},
+		eventHandlersByHash = {},
+		eventHashesByName = {},
 		scripts = {},
 		scriptsByPath = {},
 		assetFiles = {},

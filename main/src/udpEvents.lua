@@ -1,6 +1,5 @@
-local json = require("main.json")
-
 local log = require("main.src.log")
+local eventCodec = require("main.src.eventCodec")
 
 local M = {}
 
@@ -13,12 +12,12 @@ local RECV_PACKET_ADDRESS = 0x39085CA4 -- inferred from recvPacketSize + 0x0C, m
 
 local MAX_PACKET_SIZE = 0x10000
 local TRAILER_SIZE = 8
+local MAX_RAW_MESSAGE_SIZE = MAX_PACKET_SIZE - TRAILER_SIZE - 8
 local MAGIC = "SRCE"
 local BATCH_VERSION = 1
-local MAX_UDP_EVENT_BYTES = 12 * 1024
 
 local KIND_RELIABLE_EVENT = 1
-local KIND_RELIABLE_ACK = 2
+local KIND_RELIABLE_ACK_BATCH = 2
 local KIND_RELIABLE_RESULT = 3
 
 local function hasMemoryAPI()
@@ -110,84 +109,141 @@ local function ipv4FromInteger(value)
 		unsigned = unsigned + 0x100000000
 	end
 
-	local a = unsigned % 256
-	unsigned = math.floor(unsigned / 256)
-	local b = unsigned % 256
+	local d = unsigned % 256
 	unsigned = math.floor(unsigned / 256)
 	local c = unsigned % 256
 	unsigned = math.floor(unsigned / 256)
-	local d = unsigned % 256
+	local b = unsigned % 256
+	unsigned = math.floor(unsigned / 256)
+	local a = unsigned % 256
 	return string.format("%d.%d.%d.%d", a, b, c, d)
 end
 
-local function safeJsonEncode(value)
-	local ok, encoded = pcall(json.encode, value)
-	if not ok or type(encoded) ~= "string" then
-		return nil
+local function normalizeEventHash(value)
+	if type(value) == "string" and #value == 8 then
+		return value
 	end
-	return encoded
+
+	if type(value) == "string" and value ~= "" then
+		return eventCodec.hashName(value)
+	end
+
+	return nil
 end
 
-local function safeJsonDecode(value)
-	if type(value) ~= "string" or value == "" then
-		return {}
+local function encodeEventLikeMessage(kind, eventHash, msgId, payloadBytes)
+	local normalizedHash = normalizeEventHash(eventHash)
+	if not normalizedHash then
+		return nil, "invalid event hash"
 	end
 
-	local ok, decoded = pcall(json.decode, value)
-	if not ok or type(decoded) ~= "table" then
-		return nil
-	end
-	return decoded
-end
-
-local function encodeMessage(kind, msgId, name, jsonPayload, binaryPayload)
-	name = type(name) == "string" and name or ""
-	jsonPayload = type(jsonPayload) == "string" and jsonPayload or ""
-	binaryPayload = type(binaryPayload) == "string" and binaryPayload or ""
-
-	if #name > 0xFFFF then
-		return nil, "name too large"
-	end
-
-	local message = string.pack(">BBI2I4I4I4", kind, 0, #name, msgId or 0, #jsonPayload, #binaryPayload)
-		.. name
-		.. jsonPayload
-		.. binaryPayload
-	if #message > MAX_UDP_EVENT_BYTES then
+	payloadBytes = type(payloadBytes) == "string" and payloadBytes or ""
+	local message = string.pack(">BBc8I4I4", kind, 0, normalizedHash, msgId or 0, #payloadBytes) .. payloadBytes
+	if #message > MAX_RAW_MESSAGE_SIZE then
 		return nil, "message too large"
 	end
-
 	return message
 end
 
-local function decodeMessage(raw)
-	if type(raw) ~= "string" or #raw < 16 then
+local function encodeAckBatchMessage(msgIds, startIndex, count)
+	if type(msgIds) ~= "table" or type(startIndex) ~= "number" or type(count) ~= "number" or count <= 0 then
+		return nil, "empty ack batch"
+	end
+
+	local parts = { string.pack(">BBI2", KIND_RELIABLE_ACK_BATCH, 0, count) }
+	for i = 0, count - 1 do
+		local msgId = msgIds[startIndex + i]
+		if type(msgId) ~= "number" then
+			return nil, "invalid ack id"
+		end
+		parts[#parts + 1] = string.pack(">I4", math.floor(msgId))
+	end
+
+	local message = table.concat(parts)
+	if #message > MAX_RAW_MESSAGE_SIZE then
+		return nil, "ack batch too large"
+	end
+	return message
+end
+
+local function encodeResultMessage(eventHash, msgId, payloadBytes)
+	return encodeEventLikeMessage(KIND_RELIABLE_RESULT, eventHash, msgId, payloadBytes)
+end
+
+local function decodeEventLikeMessage(kind, raw)
+	local headerSize = 2 + 8 + 4 + 4
+	if type(raw) ~= "string" or #raw < headerSize then
 		return nil, "message too short"
 	end
 
-	local kind, _, nameLen, msgId, jsonLen, binLen, nextPos = string.unpack(">BBI2I4I4I4", raw)
-	local expectedSize = 16 + nameLen + jsonLen + binLen
-	if expectedSize ~= #raw then
+	local _, _, eventHash, msgId, payloadSize, nextPos = string.unpack(">BBc8I4I4", raw)
+	if payloadSize < 0 or nextPos + payloadSize - 1 > #raw then
 		return nil, "message size mismatch"
 	end
 
-	local name = raw:sub(nextPos, nextPos + nameLen - 1)
-	nextPos = nextPos + nameLen
-	local jsonPayload = raw:sub(nextPos, nextPos + jsonLen - 1)
-	nextPos = nextPos + jsonLen
-	local binaryPayload = raw:sub(nextPos, nextPos + binLen - 1)
-	local payload = safeJsonDecode(jsonPayload)
-	if payload == nil then
-		return nil, "invalid message json payload"
+	local payloadBytes = raw:sub(nextPos, nextPos + payloadSize - 1)
+	nextPos = nextPos + payloadSize
+	local args, argErr = eventCodec.decodeArgs(payloadBytes)
+	if not args then
+		return nil, argErr
+	end
+
+	if nextPos ~= (#raw + 1) then
+		return nil, "message size mismatch"
 	end
 
 	return {
 		kind = kind,
+		eventHash = eventHash,
 		msgId = msgId,
-		name = name,
-		payload = payload,
-		binaryPayload = binaryPayload,
+		payloadBytes = payloadBytes,
+		args = args,
 	}
+end
+
+local function decodeAckBatchMessage(raw)
+	if type(raw) ~= "string" or #raw < 4 then
+		return nil, "message too short"
+	end
+
+	local _, _, count, nextPos = string.unpack(">BBI2", raw)
+	local msgIds = {}
+	for i = 1, count do
+		if nextPos + 3 > #raw then
+			return nil, "truncated ack batch"
+		end
+		local msgId
+		msgId, nextPos = string.unpack(">I4", raw, nextPos)
+		msgIds[i] = msgId
+	end
+
+	if nextPos <= #raw and nextPos - 1 ~= #raw then
+		return nil, "message size mismatch"
+	end
+
+	return {
+		kind = KIND_RELIABLE_ACK_BATCH,
+		msgIds = msgIds,
+	}
+end
+
+local function decodeMessage(raw)
+	if type(raw) ~= "string" or #raw < 4 then
+		return nil, "message too short"
+	end
+
+	local kind = raw:byte(1)
+	if kind == KIND_RELIABLE_EVENT then
+		return decodeEventLikeMessage(kind, raw)
+	end
+	if kind == KIND_RELIABLE_ACK_BATCH then
+		return decodeAckBatchMessage(raw)
+	end
+	if kind == KIND_RELIABLE_RESULT then
+		return decodeEventLikeMessage(kind, raw)
+	end
+
+	return nil, "unknown message kind"
 end
 
 local function buildBatch(sendQueue, maxBatchBytes)
@@ -276,49 +332,132 @@ local function splitPacket(raw)
 	return raw:sub(1, vanillaSize), raw:sub(vanillaSize + 1, #raw - TRAILER_SIZE)
 end
 
+local function getPendingAckWindow(client)
+	local order = client and client.udpPendingAckOrder
+	local startIndex = client and client.udpPendingAckStart or 1
+	if type(order) ~= "table" or #order == 0 or startIndex > #order then
+		return nil, 0, 0
+	end
+
+	return order, startIndex, #order - startIndex + 1
+end
+
+local function queueAck(client, msgId)
+	if not client or type(msgId) ~= "number" then
+		return false
+	end
+
+	local normalized = math.floor(msgId)
+	if normalized <= 0 then
+		return false
+	end
+
+	client.udpPendingAckOrder = client.udpPendingAckOrder or {}
+	client.udpPendingAckSet = client.udpPendingAckSet or {}
+	if client.udpPendingAckSet[normalized] then
+		return true
+	end
+
+	client.udpPendingAckOrder[#client.udpPendingAckOrder + 1] = normalized
+	client.udpPendingAckSet[normalized] = true
+	return true
+end
+
+local function consumeAckBatch(client, count)
+	if not client or type(count) ~= "number" or count <= 0 then
+		return
+	end
+
+	local order = client.udpPendingAckOrder
+	local set = client.udpPendingAckSet
+	local startIndex = client.udpPendingAckStart or 1
+	if type(order) ~= "table" or type(set) ~= "table" then
+		return
+	end
+
+	local lastIndex = math.min(#order, startIndex + count - 1)
+	for i = startIndex, lastIndex do
+		local msgId = order[i]
+		if msgId ~= nil then
+			set[msgId] = nil
+		end
+	end
+
+	startIndex = lastIndex + 1
+	if startIndex > #order then
+		client.udpPendingAckOrder = {}
+		client.udpPendingAckSet = {}
+		client.udpPendingAckStart = 1
+	else
+		client.udpPendingAckStart = startIndex
+	end
+end
+
+local function buildAckBatchForPacket(client, maxBatchBytes)
+	local order, startIndex, remaining = getPendingAckWindow(client)
+	if not order or remaining <= 0 then
+		return nil, 0
+	end
+
+	local maxCount = math.floor((maxBatchBytes - 8) / 4)
+	if maxCount <= 0 then
+		return nil, 0
+	end
+
+	local count = math.min(remaining, maxCount)
+	return encodeAckBatchMessage(order, startIndex, count), count
+end
+
 function M.resetClient(client)
 	if not client then
 		return
 	end
 
 	client.udpSendQueue = {}
+	client.udpPendingAckOrder = {}
+	client.udpPendingAckSet = {}
+	client.udpPendingAckStart = 1
 	client.udpEventsReady = false
 	client.udpEndpointAddress = nil
 	client.udpEndpointPort = nil
 end
 
-function M.encodeReliableEvent(direction, name, msgId, data, bin)
-	local payload = {
-		dir = direction,
-		data = data,
-	}
-	local jsonPayload = safeJsonEncode(payload)
-	if not jsonPayload then
-		return nil, "failed to encode event payload"
-	end
-	return encodeMessage(KIND_RELIABLE_EVENT, msgId, name, jsonPayload, bin)
+function M.binary(bytes)
+	return eventCodec.blob(bytes)
 end
 
-function M.encodeReliableAck(msgId)
-	return encodeMessage(KIND_RELIABLE_ACK, msgId, "", "", "")
+function M.hashEventName(name)
+	return eventCodec.hashName(name)
 end
 
-function M.encodeReliableResult(msgId, name, payload)
-	local jsonPayload = safeJsonEncode(payload or {})
-	if not jsonPayload then
-		return nil, "failed to encode result payload"
-	end
-	return encodeMessage(KIND_RELIABLE_RESULT, msgId, name, jsonPayload, "")
+function M.formatEventHash(value)
+	return eventCodec.hex(value)
+end
+
+function M.encodeReliableEvent(eventHash, msgId, payloadBytes)
+	return encodeEventLikeMessage(KIND_RELIABLE_EVENT, eventHash, msgId, payloadBytes)
+end
+
+function M.encodeReliableAckBatch(msgIds, startIndex, count)
+	return encodeAckBatchMessage(msgIds, startIndex, count)
+end
+
+function M.encodeReliableResult(eventHash, msgId, payloadBytes)
+	return encodeResultMessage(eventHash, msgId, payloadBytes)
 end
 
 function M.enqueue(client, encodedMessage)
-	if not client or type(encodedMessage) ~= "string" or encodedMessage == "" then
+	if not client or type(encodedMessage) ~= "string" or #encodedMessage == 0 then
 		return false
 	end
 
 	client.udpSendQueue = client.udpSendQueue or {}
 	client.udpSendQueue[#client.udpSendQueue + 1] = encodedMessage
 	return true
+end
+
+function M.queueAck(client, msgId)
+	return queueAck(client, msgId)
 end
 
 function M.findClientForEndpoint(state, address, port)
@@ -353,7 +492,7 @@ function M.onSendPacket(state, address, port)
 	end
 
 	local _, client = M.findClientForEndpoint(state, address, port)
-	if not client or client.udpEventsReady ~= true or type(client.udpSendQueue) ~= "table" or #client.udpSendQueue == 0 then
+	if not client or client.udpEventsReady ~= true then
 		return
 	end
 
@@ -367,7 +506,22 @@ function M.onSendPacket(state, address, port)
 		return
 	end
 
-	local batch, count = buildBatch(client.udpSendQueue, maxBatchBytes)
+	local ackBytes, ackCount = buildAckBatchForPacket(client, maxBatchBytes)
+	local queueToBatch
+	if type(ackBytes) == "string" and ackCount > 0 then
+		queueToBatch = { ackBytes }
+		local sendQueue = client.udpSendQueue
+		if type(sendQueue) == "table" and #sendQueue > 0 then
+			for i = 1, #sendQueue do
+				queueToBatch[#queueToBatch + 1] = sendQueue[i]
+			end
+		end
+	else
+		queueToBatch = client.udpSendQueue
+		ackCount = 0
+	end
+
+	local batch, count = buildBatch(queueToBatch, maxBatchBytes)
 	if type(batch) ~= "string" or count <= 0 then
 		return
 	end
@@ -394,7 +548,8 @@ function M.onSendPacket(state, address, port)
 		originalSize = packetSize,
 		originalTail = originalTail,
 		appendedSize = #trailer,
-		commitCount = count,
+		ackCount = ackCount,
+		eventCount = math.max(0, count - (ackCount > 0 and 1 or 0)),
 	}
 end
 
@@ -412,9 +567,15 @@ function M.onPostSendPacket(state)
 	writeInt(PACKET_SIZE_ADDRESS, mutation.originalSize)
 
 	local client = mutation.client
-	if client and type(client.udpSendQueue) == "table" then
-		for _ = 1, mutation.commitCount do
-			table.remove(client.udpSendQueue, 1)
+	if client then
+		if mutation.ackCount and mutation.ackCount > 0 then
+			consumeAckBatch(client, mutation.ackCount)
+		end
+
+		if mutation.eventCount and mutation.eventCount > 0 and type(client.udpSendQueue) == "table" then
+			for _ = 1, mutation.eventCount do
+				table.remove(client.udpSendQueue, 1)
+			end
 		end
 	end
 end

@@ -1,5 +1,6 @@
 ---@diagnostic disable: lowercase-global
 local log = require("main.src.log")
+local eventCodec = require("main.src.eventCodec")
 local shared = require("main.src.shared")
 local network = require("main.src.network")
 local itemTypeSync = require("main.src.itemTypes")
@@ -64,15 +65,28 @@ function src.refreshSyncFiles()
 end
 
 function src.onClientEvent(name, fn)
-	network.onClientEvent(state, name, fn)
+	assert(type(name) == "string" and name ~= "", "src.onClientEvent(name, fn): name must be non-empty string")
+	assert(type(fn) == "function", "src.onClientEvent(name, fn): fn must be function")
+
+	return network.onClientEvent(state, name, fn)
 end
 
-function src.emitClientEvent(player, name, data, bin)
+function src.emitClientEvent(player, name, ...)
 	if player ~= nil then
 		assert(type(player) == "userdata" and player.class == "Player", "src.emitClientEvent(player, ...): player must be Player or nil")
 		assert(not player.isBot, "src.emitClientEvent(player, ...): player cannot be a bot")
 	end
-	return network.emitClientEvent(state, player, name, data, bin)
+	assert(type(name) == "string" and name ~= "", "src.emitClientEvent(player, name, ...): name must be non-empty string")
+
+	local hash = eventCodec.hashName(name)
+	if not hash then
+		error("src.emitClientEvent(player, name, ...): failed to hash event name")
+	end
+
+	local argsBytes, encodeErr = eventCodec.encodeArgs(...)
+	assert(argsBytes ~= nil, "src.emitClientEvent(player, name, ...): " .. tostring(encodeErr))
+
+	return network.emitClientEvent(state, player, name, hash, argsBytes)
 end
 
 function src.syncClientItemTypes(player, payload)
@@ -111,6 +125,12 @@ end
 function src.listScripts()
 	return shared.discoverScripts(state)
 end
+
+function src.binary(bytes)
+	return network.binary(bytes)
+end
+
+src.blob = src.binary
 
 local function ensureNonSRCGateHook()
 	if type(hook) ~= "table" or type(hook.add) ~= "function" then

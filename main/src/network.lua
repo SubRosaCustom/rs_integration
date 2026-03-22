@@ -8,6 +8,7 @@ local M = {}
 local BINARY_MAGIC = "SRCB"
 local disconnectOtherConnectionsForPlayer
 local loggedLegacyTcpEventFrame = false
+local unpackFn = table.unpack or unpack
 
 local function parsePositiveInteger(value)
 	if type(value) == "number" then
@@ -69,6 +70,7 @@ local function ensureEventTrackingTables(client)
 	client.awaitingResults = client.awaitingResults or {}
 	client.earlyResults = client.earlyResults or {}
 	client.recentCompleted = client.recentCompleted or {}
+	client.pendingResults = client.pendingResults or {}
 end
 
 local function markEventRecentlyCompleted(state, client, msgId)
@@ -84,11 +86,12 @@ local function cleanupRecentCompletions(state, client)
 	end
 end
 
-local function logEventResult(state, connection, name, msgId, payload)
-	local status = tostring(payload.status or "")
-	local handled = tonumber(payload.handled) or 0
-	local errors = tonumber(payload.errors) or 0
-	local detail = tostring(payload.error or "")
+local function logEventResult(state, connection, name, msgId, result)
+	local args = result and result.args or nil
+	local status = tostring((args and args[1]) or result and result.status or "")
+	local handled = tonumber((args and args[2]) or result and result.handled) or 0
+	local errors = tonumber((args and args[3]) or result and result.errors) or 0
+	local detail = tostring((args and args[4]) or result and result.detail or "")
 
 	if status == "processed" and errors == 0 then
 		if state.config.eventDebugLogSuccess then
@@ -208,6 +211,7 @@ local function resetClientSyncState(client)
 	closeClientTransfer(client)
 	client.pendingFileRequests = {}
 	client.pendingEvents = {}
+	client.pendingResults = {}
 	client.awaitingResults = {}
 	client.earlyResults = {}
 	client.recentCompleted = {}
@@ -481,52 +485,54 @@ local function pumpFileTransfer(state, connection)
 	end
 end
 
-local function handleClientEvent(state, connection, payload)
-	local name = payload and payload.name
-	if type(name) ~= "string" or name == "" then
-		return false, "invalid_name"
-	end
-
-	local callbacks = state.eventHandlers[name]
-	if not callbacks or #callbacks == 0 then
+local function handleClientEvent(state, connection, message)
+	local eventHash = message and message.eventHash
+	local msgId = message and message.msgId
+	local args = message and message.args or { n = 0 }
+	local registry = state.eventHandlersByHash and state.eventHandlersByHash[eventHash] or nil
+	local eventName = registry and registry.name or udpEvents.formatEventHash(eventHash)
+	if not registry or not registry.callbacks or #registry.callbacks == 0 then
 		log.warn(
-			"event rejected [NOTHING_HANDLED_EVENT_ON_SERVER]: name=%s id=%s client=%s",
-			name,
-			tostring(payload and payload.msgId),
+			"event rejected [NOTHING_HANDLED_EVENT_ON_SERVER]: hash=%s id=%s client=%s",
+			tostring(eventName),
+			tostring(msgId),
 			shared.clientId(connection)
 		)
-		enqueueFrame(state, connection, "ERROR_REPORT", {
-			code = "NOTHING_HANDLED_EVENT_ON_SERVER",
-			error = "No server handlers registered for event",
-			name = name,
-			msgId = payload and payload.msgId,
-		})
-		return false, "no_handler"
+		return {
+			status = "nothing_handled",
+			handled = 0,
+			errors = 0,
+			detail = "No server handlers registered for event",
+			eventName = eventName,
+			eventHash = eventHash,
+		}
 	end
 
-	local hadErrors = false
-	for _, fn in ipairs(callbacks) do
-		local ok, err = pcall(fn, connection, payload.data, payload.bin)
+	local handled = 0
+	local errors = 0
+	local detail = ""
+	for _, fn in ipairs(registry.callbacks) do
+		local ok, err = pcall(fn, connection, unpackFn(args, 1, args.n or 0))
+		handled = handled + 1
 		if not ok then
-			hadErrors = true
-			log.warn("src.onClientEvent callback failed (%s): %s", name, err)
+			errors = errors + 1
+			detail = tostring(err)
+			log.warn("src.onClientEvent callback failed (%s): %s", eventName, err)
 		end
 	end
 
-	if hadErrors then
-		enqueueFrame(state, connection, "ERROR_REPORT", {
-			code = "NOTHING_HANDLED_EVENT_ON_SERVER",
-			error = "One or more server handlers failed while processing event",
-			name = name,
-			msgId = payload and payload.msgId,
-		})
-		return false, "handler_error"
-	end
-
-	return true, "processed"
+	local status = errors == 0 and "processed" or "handler_error"
+	return {
+		status = status,
+		handled = handled,
+		errors = errors,
+		detail = detail,
+		eventName = eventName,
+		eventHash = eventHash,
+	}
 end
 
-local function queueReliableUdpEvent(state, connection, direction, name, data, bin)
+local function queueReliableUdpEvent(state, connection, name, eventHash, argsBytes)
 	local client = state.clients[connection]
 	if not client or not connection.isOpen or not client.hello or not client.bound then
 		return false
@@ -536,36 +542,43 @@ local function queueReliableUdpEvent(state, connection, direction, name, data, b
 		return false
 	end
 
-	local payload = {
-		dir = direction,
-		name = name,
-		data = data,
-	}
-
-	if bin ~= nil then
-		if type(bin) ~= "string" then
-			return false
+	state.eventHashesByName = state.eventHashesByName or {}
+	if not eventHash then
+		eventHash = state.eventHashesByName[name]
+		if not eventHash then
+			eventHash = udpEvents.hashEventName(name)
+			if not eventHash then
+				return false
+			end
+			state.eventHashesByName[name] = eventHash
 		end
-		payload.bin = bin
 	end
 
-	if shared.eventPayloadSize(payload) > state.config.maxEventBytes then
+	if type(argsBytes) ~= "string" then
+		local encoded, encodeErr = eventCodec.encodeArgs()
+		if not encoded then
+			log.warn("failed to encode empty UDP event payload (%s): %s", name, tostring(encodeErr))
+			return false
+		end
+		argsBytes = encoded
+	end
+
+	local msgID = state.nextEventID
+	local bytes, encodeErr = udpEvents.encodeReliableEvent(eventHash, msgID, argsBytes)
+	if not bytes then
+		log.warn("failed to encode UDP event (%s): %s", name, tostring(encodeErr))
+		return false
+	end
+	if #bytes > state.config.maxEventBytes then
 		log.warn("event too large; dropping (%s)", name)
 		return false
 	end
 
-	local msgID = state.nextEventID
 	state.nextEventID = state.nextEventID + 1
 	if state.nextEventID > 2147483647 then
 		state.nextEventID = 1
 	end
 
-	payload.msgId = msgID
-	local bytes, encodeErr = udpEvents.encodeReliableEvent(direction, name, msgID, payload.data, bin)
-	if not bytes then
-		log.warn("failed to encode UDP event (%s): %s", name, tostring(encodeErr))
-		return false
-	end
 	udpEvents.enqueue(client, bytes)
 
 	client.pendingEvents[msgID] = {
@@ -573,6 +586,64 @@ local function queueReliableUdpEvent(state, connection, direction, name, data, b
 		attempts = 1,
 		nextRetryTick = state.tick + state.config.eventRetryBaseTicks,
 		name = name,
+		eventHash = eventHash,
+		createdTick = state.tick,
+		lastRetryTick = state.tick,
+	}
+
+	return true
+end
+
+local function queueReliableUdpResult(state, connection, name, msgId, eventHash, payloadBytes)
+	local client = state.clients[connection]
+	if not client or not connection.isOpen or not client.hello or not client.bound then
+		return false
+	end
+
+	if type(name) ~= "string" or name == "" then
+		return false
+	end
+
+	local normalizedMsgId = parseMsgId(msgId)
+	if not normalizedMsgId then
+		return false
+	end
+
+	state.eventHashesByName = state.eventHashesByName or {}
+	if not eventHash then
+		eventHash = state.eventHashesByName[name]
+		if not eventHash then
+			eventHash = udpEvents.hashEventName(name)
+			if not eventHash then
+				return false
+			end
+			state.eventHashesByName[name] = eventHash
+		end
+	end
+
+	if type(payloadBytes) ~= "string" then
+		return false
+	end
+
+	local bytes, encodeErr = udpEvents.encodeReliableResult(eventHash, normalizedMsgId, payloadBytes)
+	if not bytes then
+		log.warn("failed to encode UDP result (%s): %s", name, tostring(encodeErr))
+		return false
+	end
+	if #bytes > state.config.maxEventBytes then
+		log.warn("result too large; dropping (%s)", name)
+		return false
+	end
+
+	udpEvents.enqueue(client, bytes)
+
+	client.pendingResults = client.pendingResults or {}
+	client.pendingResults[normalizedMsgId] = {
+		bytes = bytes,
+		attempts = 1,
+		nextRetryTick = state.tick + state.config.eventRetryBaseTicks,
+		name = name,
+		eventHash = eventHash,
 		createdTick = state.tick,
 		lastRetryTick = state.tick,
 	}
@@ -589,55 +660,73 @@ local function logLegacyTcpEventFrame(frameType)
 	log.warn("ignoring legacy TCP event-lane frame (%s)", tostring(frameType))
 end
 
-local function handleReliableEventAckPayload(state, connection, payload)
+local function handleReliableEventAckBatchPayload(state, connection, msgIds)
 	local client = state.clients[connection]
-	local msgId = parseMsgId(payload.msgId)
-	if client and msgId then
+	if client and type(msgIds) == "table" then
 		ensureEventTrackingTables(client)
-		local pending = client.pendingEvents[msgId]
-		if pending then
-			client.pendingEvents[msgId] = nil
-			client.awaitingResults[msgId] = {
-				name = pending.name,
-				ackedTick = state.tick,
-				deadlineTick = state.tick + state.config.eventProcessTimeoutTicks,
-			}
+		for i = 1, #msgIds do
+			local msgId = parseMsgId(msgIds[i])
+			if msgId then
+				local pending = client.pendingEvents[msgId]
+				if pending then
+					client.pendingEvents[msgId] = nil
+					client.awaitingResults[msgId] = {
+						name = pending.name,
+						eventHash = pending.eventHash,
+						ackedTick = state.tick,
+						deadlineTick = state.tick + state.config.eventProcessTimeoutTicks,
+					}
 
-			local early = client.earlyResults[msgId]
-			if early then
-				client.earlyResults[msgId] = nil
-				local trackedName = client.awaitingResults[msgId] and client.awaitingResults[msgId].name or pending.name
-				client.awaitingResults[msgId] = nil
-				markEventRecentlyCompleted(state, client, msgId)
-				logEventResult(state, connection, trackedName, msgId, early)
+					local early = client.earlyResults[msgId]
+					if early then
+						client.earlyResults[msgId] = nil
+						local trackedName = client.awaitingResults[msgId] and client.awaitingResults[msgId].name or pending.name
+						client.awaitingResults[msgId] = nil
+						markEventRecentlyCompleted(state, client, msgId)
+						logEventResult(state, connection, trackedName, msgId, early)
+					end
+				elseif client.pendingResults[msgId] then
+					client.pendingResults[msgId] = nil
+					markEventRecentlyCompleted(state, client, msgId)
+				elseif client.awaitingResults[msgId] then
+					-- Duplicate ACK while waiting for processing result; ignore.
+				elseif client.recentCompleted[msgId] then
+					-- Late ACK for a message we've already finalized; ignore.
+				else
+					log.warn("received EVENT_ACK for unknown id=%s from %s", msgId, shared.clientId(connection))
+				end
 			end
-		elseif client.awaitingResults[msgId] then
-			-- Duplicate ACK while waiting for processing result; ignore.
-		elseif client.recentCompleted[msgId] then
-			-- Late ACK for a message we've already finalized; ignore.
-		else
-			log.warn("received EVENT_ACK for unknown id=%s from %s", msgId, shared.clientId(connection))
 		end
 	end
 end
 
-local function handleReliableEventResultPayload(state, connection, payload)
+local function handleReliableEventResultPayload(state, connection, message)
 	local client = state.clients[connection]
 	if not client then
 		return
 	end
 	ensureEventTrackingTables(client)
 
-	local msgId = parseMsgId(payload.msgId)
+	local msgId = parseMsgId(message and message.msgId)
 	if not msgId then
 		log.warn("received EVENT_RESULT with invalid msgId from %s", shared.clientId(connection))
 		return
 	end
 
+	local args = message and message.args or { n = 0 }
 	local tracked = client.awaitingResults[msgId]
+	local result = {
+		eventHash = message and message.eventHash,
+		status = tostring(args[1] or ""),
+		handled = tonumber(args[2]) or 0,
+		errors = tonumber(args[3]) or 0,
+		detail = tostring(args[4] or ""),
+		args = args,
+	}
+
 	if not tracked then
 		if client.pendingEvents[msgId] then
-			client.earlyResults[msgId] = payload
+			client.earlyResults[msgId] = result
 			return
 		end
 		if client.recentCompleted[msgId] then
@@ -650,7 +739,7 @@ local function handleReliableEventResultPayload(state, connection, payload)
 	client.awaitingResults[msgId] = nil
 	client.earlyResults[msgId] = nil
 	markEventRecentlyCompleted(state, client, msgId)
-	logEventResult(state, connection, tracked.name, msgId, payload)
+	logEventResult(state, connection, tracked.name, msgId, result)
 end
 
 local function queueItemTypesSyncFrame(state, connection, payload)
@@ -809,16 +898,6 @@ local function sendInitialCustomItemSync(state, connection)
 			log.warn("failed building custom item type sync payload: %s", tostring(payloadOrErr))
 		end
 	end
-end
-
-local function acknowledgeEvent(state, connection, msgID)
-	if not msgID then
-		return
-	end
-
-	enqueueFrame(state, connection, "EVENT_ACK", {
-		msgId = msgID,
-	})
 end
 
 local function handleFrame(state, connection, frame)
@@ -1046,6 +1125,27 @@ local function processPendingRetries(state, connection)
 		end
 	end
 
+	for msgID, pending in pairs(client.pendingResults) do
+		if state.tick >= pending.nextRetryTick then
+			if pending.attempts >= maxAttempts then
+				log.warn(
+					"result delivery failed [SERVER_NEVER_RECEIVED_IT]: name=%s id=%s client=%s attempts=%s",
+					pending.name or "?",
+					msgID,
+					shared.clientId(connection),
+					pending.attempts
+				)
+				client.pendingResults[msgID] = nil
+				markEventRecentlyCompleted(state, client, msgID)
+			else
+				pending.attempts = pending.attempts + 1
+				pending.nextRetryTick = state.tick + baseTicks * (2 ^ (pending.attempts - 1))
+				pending.lastRetryTick = state.tick
+				udpEvents.enqueue(client, pending.bytes)
+			end
+		end
+	end
+
 	for msgID, pending in pairs(client.awaitingResults) do
 		if state.tick >= pending.deadlineTick then
 			log.warn(
@@ -1089,6 +1189,7 @@ local function acceptConnections(state)
 			bound = false,
 			generation = 0,
 			pendingEvents = {},
+			pendingResults = {},
 			awaitingResults = {},
 			earlyResults = {},
 			recentCompleted = {},
@@ -1179,20 +1280,66 @@ function M.onClientEvent(state, name, fn)
 	assert(type(name) == "string", "src.onClientEvent(name, fn): name must be string")
 	assert(type(fn) == "function", "src.onClientEvent(name, fn): fn must be function")
 
-	if not state.eventHandlers[name] then
-		state.eventHandlers[name] = {}
+	state.eventHandlers = state.eventHandlers or {}
+	state.eventHandlersByHash = state.eventHandlersByHash or {}
+	state.eventHashesByName = state.eventHashesByName or {}
+
+	local eventHash = state.eventHashesByName[name]
+	if not eventHash then
+		eventHash = udpEvents.hashEventName(name)
+		if not eventHash then
+			error("src.onClientEvent(name, fn): failed to hash event name")
+		end
+		state.eventHashesByName[name] = eventHash
 	end
 
-	table.insert(state.eventHandlers[name], fn)
+	local registry = state.eventHandlersByHash[eventHash]
+	if registry and registry.name ~= name then
+		log.warn(
+			"event hash collision while registering src.onClientEvent (%s vs %s, hash=%s)",
+			registry.name,
+			name,
+			udpEvents.formatEventHash(eventHash)
+		)
+		return false
+	end
+
+	local callbacks = state.eventHandlers[name]
+	if registry then
+		callbacks = registry.callbacks or callbacks
+		registry.callbacks = callbacks
+		state.eventHandlers[name] = callbacks
+	else
+		if not callbacks then
+			callbacks = {}
+			state.eventHandlers[name] = callbacks
+		end
+		registry = {
+			name = name,
+			callbacks = callbacks,
+		}
+		state.eventHandlersByHash[eventHash] = registry
+	end
+
+	table.insert(callbacks, fn)
+	return true
 end
 
-function M.emitClientEvent(state, player, name, data, bin)
+function M.emitClientEvent(state, player, name, eventHash, argsBytes)
+	local args = argsBytes
+	if type(argsBytes) == "string" then
+		args = eventCodec.decodeArgs(argsBytes)
+		if not args then
+			return false
+		end
+	end
+
 	if player == nil then
 		local sent = 0
 		for connection, client in pairs(state.clients) do
 			local ply = connection.player
 			if connection.isOpen and client.hello and client.bound and (not ply or not ply.isBot) then
-				if queueReliableUdpEvent(state, connection, "s2c", name, data, bin) then
+				if queueReliableUdpEvent(state, connection, name, eventHash, args) then
 					sent = sent + 1
 				end
 			end
@@ -1213,7 +1360,11 @@ function M.emitClientEvent(state, player, name, data, bin)
 		return false
 	end
 
-	return queueReliableUdpEvent(state, connection, "s2c", name, data, bin)
+	return queueReliableUdpEvent(state, connection, name, eventHash, args)
+end
+
+function M.binary(bytes)
+	return udpEvents.binary(bytes)
 end
 
 function M.syncClientItemTypes(state, player, payload)
@@ -1443,37 +1594,43 @@ function M.onPostPacketReceive(state)
 
 	for _, message in ipairs(decoded.messages) do
 		if message.kind == 1 then
-			if client.hello and client.bound and message.payload and message.payload.dir == "c2s" then
-				local eventPayload = {
-					name = message.name,
-					msgId = message.msgId,
-					dir = message.payload.dir,
-					data = message.payload.data,
-					bin = message.binaryPayload ~= "" and message.binaryPayload or nil,
-				}
-				local ackBytes = udpEvents.encodeReliableAck(message.msgId)
-				if ackBytes then
-					udpEvents.enqueue(client, ackBytes)
-				end
-
-				local ok, reason = handleClientEvent(state, connection, eventPayload)
-				if not ok and reason == "invalid_name" then
-					enqueueFrame(state, connection, "ERROR_REPORT", {
-						code = "NOTHING_HANDLED_EVENT_ON_SERVER",
-						error = "Invalid event name in c2s event payload",
-						msgId = message.msgId,
-					})
+			if client.hello and client.bound then
+				udpEvents.queueAck(client, message.msgId)
+				local result = handleClientEvent(state, connection, message)
+				local resultPayload, encodeErr = eventCodec.encodeArgs(
+					result.status,
+					result.handled,
+					result.errors,
+					result.detail or ""
+				)
+				if resultPayload then
+					if not queueReliableUdpResult(
+						state,
+						connection,
+						result.eventName or udpEvents.formatEventHash(message.eventHash),
+						message.msgId,
+						message.eventHash,
+						resultPayload
+					) then
+						log.warn(
+							"failed to queue result for client event (%s) id=%s client=%s",
+							result.eventName or udpEvents.formatEventHash(message.eventHash),
+							message.msgId,
+							shared.clientId(connection)
+						)
+					end
+				else
+					log.warn(
+						"failed to encode result payload for client event (%s): %s",
+						result.eventName or udpEvents.formatEventHash(message.eventHash),
+						tostring(encodeErr)
+					)
 				end
 			end
 		elseif message.kind == 2 then
-			handleReliableEventAckPayload(state, connection, {
-				msgId = message.msgId,
-			})
+			handleReliableEventAckBatchPayload(state, connection, message.msgIds)
 		elseif message.kind == 3 then
-			local resultPayload = message.payload or {}
-			resultPayload.msgId = message.msgId
-			resultPayload.name = message.name
-			handleReliableEventResultPayload(state, connection, resultPayload)
+			handleReliableEventResultPayload(state, connection, message)
 		end
 	end
 end
