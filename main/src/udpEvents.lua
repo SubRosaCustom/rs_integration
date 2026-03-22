@@ -23,13 +23,34 @@ local KIND_RELIABLE_RESULT = 3
 
 local function hasMemoryAPI()
 	return type(memory) == "table"
+		and type(memory.getBaseAddress) == "function"
 		and type(memory.readBytes) == "function"
 		and type(memory.writeBytes) == "function"
 		and type(memory.readInt) == "function"
 		and type(memory.writeInt) == "function"
 end
 
-local function readInt(address)
+local function getBaseAddress()
+	local ok, value = pcall(memory.getBaseAddress)
+	if not ok or type(value) ~= "number" or value == 0 then
+		return nil
+	end
+	return math.floor(value)
+end
+
+local function resolveAddress(offset)
+	local baseAddress = getBaseAddress()
+	if not baseAddress then
+		return nil
+	end
+	return baseAddress + offset
+end
+
+local function readInt(offset)
+	local address = resolveAddress(offset)
+	if not address then
+		return nil
+	end
 	local ok, value = pcall(memory.readInt, address)
 	if not ok or type(value) ~= "number" then
 		return nil
@@ -37,12 +58,20 @@ local function readInt(address)
 	return math.floor(value)
 end
 
-local function writeInt(address, value)
+local function writeInt(offset, value)
+	local address = resolveAddress(offset)
+	if not address then
+		return false
+	end
 	local ok = pcall(memory.writeInt, address, math.floor(value))
 	return ok
 end
 
-local function readBytes(address, size)
+local function readBytes(offset, size)
+	local address = resolveAddress(offset)
+	if not address then
+		return nil
+	end
 	local ok, value = pcall(memory.readBytes, address, size)
 	if not ok or type(value) ~= "string" then
 		return nil
@@ -50,7 +79,11 @@ local function readBytes(address, size)
 	return value
 end
 
-local function writeBytes(address, value)
+local function writeBytes(offset, value)
+	local address = resolveAddress(offset)
+	if not address then
+		return false
+	end
 	local ok = pcall(memory.writeBytes, address, value)
 	return ok
 end
