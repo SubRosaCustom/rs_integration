@@ -3,6 +3,7 @@ local log = require("main.src.log")
 local eventCodec = require("main.src.eventCodec")
 local shared = require("main.src.shared")
 local network = require("main.src.network")
+local browserMarker = require("main.src.browserMarker")
 local itemTypeSync = require("main.src.itemTypes")
 
 local state = shared.getState()
@@ -194,11 +195,13 @@ if not state.hooksRegistered then
 	end)
 
 	hook.add("SendPacket", "main.src.udpSendPacket", function(address, port)
+		browserMarker.onSendPacket(state, address, port)
 		network.onSendPacket(state, address, port)
 	end)
 
 	hook.add("PostSendPacket", "main.src.udpPostSendPacket", function()
 		network.onPostSendPacket(state)
+		browserMarker.onPostSendPacket(state)
 	end)
 
 	hook.add("PostPacketReceive", "main.src.udpPostPacketReceive", function()
