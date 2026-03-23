@@ -1,8 +1,7 @@
-local log = require("main.src.log")
-
 local M = {}
 
 local PACKET_SIZE_ADDRESS = 0x39075C7C
+local PACKET_BIT_OFFSET_ADDRESS = 0x39075C80
 local PACKET_ADDRESS = 0x39075C84
 local MAX_PACKET_SIZE = 0x10000
 local MARKER = "SRCE"
@@ -111,15 +110,21 @@ local function endpointHasSRCClient(state, address, port)
 end
 
 function M.onSendPacket(state, address, port)
-	if not hasMemoryAPI() or endpointHasSRCClient(state, address, port) then
-		if endpointHasSRCClient(state, address, port) then
-			log.info("browserMarker: skipping %s:%s because endpoint is an SRC client", tostring(address), tostring(port))
-		end
+	local hasSRCClient = endpointHasSRCClient(state, address, port)
+	if not hasMemoryAPI() or hasSRCClient then
 		return
 	end
 
 	local packetSize = readInt(PACKET_SIZE_ADDRESS)
 	if type(packetSize) ~= "number" or packetSize < 5 or packetSize >= MAX_PACKET_SIZE then
+		return
+	end
+	local packetBitOffset = readInt(PACKET_BIT_OFFSET_ADDRESS)
+	if type(packetBitOffset) ~= "number" or packetBitOffset < 0 then
+		packetBitOffset = 0
+	end
+	local alignedSize = packetSize + (packetBitOffset > 0 and 1 or 0)
+	if alignedSize < 5 or alignedSize >= MAX_PACKET_SIZE then
 		return
 	end
 
@@ -128,43 +133,36 @@ function M.onSendPacket(state, address, port)
 		return
 	end
 
-	log.info("browserMarker: saw outgoing browser type=1 packet to %s:%s size=%d", tostring(address), tostring(port), packetSize)
-
 	local trailer = MARKER .. string.pack(">I2", PROTOCOL_VERSION)
-	if packetSize + #trailer > MAX_PACKET_SIZE then
-		log.warn("browserMarker: marker would overflow packet for %s:%s size=%d", tostring(address), tostring(port), packetSize)
+	if alignedSize + #trailer > MAX_PACKET_SIZE then
 		return
 	end
 
-	local originalTail = readBytes(PACKET_ADDRESS + packetSize, #trailer)
+	local originalTail = readBytes(PACKET_ADDRESS + alignedSize, #trailer)
 	if not originalTail or #originalTail ~= #trailer then
 		originalTail = string.rep("\0", #trailer)
 	end
 
-	if not writeBytes(PACKET_ADDRESS + packetSize, trailer) then
+	if not writeBytes(PACKET_ADDRESS + alignedSize, trailer) then
 		return
 	end
-	if not writeInt(PACKET_SIZE_ADDRESS, packetSize + #trailer) then
-		writeBytes(PACKET_ADDRESS + packetSize, originalTail)
+	if not writeInt(PACKET_SIZE_ADDRESS, alignedSize + #trailer) then
+		writeBytes(PACKET_ADDRESS + alignedSize, originalTail)
+		return
+	end
+	if packetBitOffset > 0 and not writeInt(PACKET_BIT_OFFSET_ADDRESS, 0) then
+		writeBytes(PACKET_ADDRESS + alignedSize, originalTail)
+		writeInt(PACKET_SIZE_ADDRESS, packetSize)
 		return
 	end
 
 	state.browserMarkerMutationStack = state.browserMarkerMutationStack or {}
 	state.browserMarkerMutationStack[#state.browserMarkerMutationStack + 1] = {
 		originalSize = packetSize,
+		originalBitOffset = packetBitOffset,
+		alignedSize = alignedSize,
 		originalTail = originalTail,
-		address = tostring(address),
-		port = normalizePort(port),
 	}
-
-	log.info(
-		"browserMarker: appended marker=%s protocol=%d to %s:%s new_size=%d",
-		MARKER,
-		PROTOCOL_VERSION,
-		tostring(address),
-		tostring(port),
-		packetSize + #trailer
-	)
 end
 
 function M.onPostSendPacket(state)
@@ -177,14 +175,9 @@ function M.onPostSendPacket(state)
 		return
 	end
 
-	writeBytes(PACKET_ADDRESS + mutation.originalSize, mutation.originalTail)
+	writeBytes(PACKET_ADDRESS + mutation.alignedSize, mutation.originalTail)
 	writeInt(PACKET_SIZE_ADDRESS, mutation.originalSize)
-	log.info(
-		"browserMarker: restored packet tail for %s:%s size=%d",
-		tostring(mutation.address),
-		tostring(mutation.port),
-		mutation.originalSize
-	)
+	writeInt(PACKET_BIT_OFFSET_ADDRESS, mutation.originalBitOffset or 0)
 end
 
 return M
