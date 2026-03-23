@@ -556,9 +556,18 @@ local function queueReliableUdpEvent(state, connection, name, eventHash, argsByt
 	end
 
 	if type(argsBytes) ~= "string" then
-		local encoded, encodeErr = eventCodec.encodeArgs()
+		local encoded, encodeErr
+		if type(argsBytes) == "table" then
+			local count = tonumber(argsBytes.n)
+			if count == nil or count < 0 then
+				count = #argsBytes
+			end
+			encoded, encodeErr = eventCodec.encodeArgs(unpackFn(argsBytes, 1, count))
+		else
+			encoded, encodeErr = eventCodec.encodeArgs()
+		end
 		if not encoded then
-			log.warn("failed to encode empty UDP event payload (%s): %s", name, tostring(encodeErr))
+			log.warn("failed to encode UDP event payload (%s): %s", name, tostring(encodeErr))
 			return false
 		end
 		argsBytes = encoded
