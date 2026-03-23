@@ -2,6 +2,7 @@ local json = require("main.json")
 
 local log = require("main.src.log")
 local shared = require("main.src.shared")
+local eventCodec = require("main.src.eventCodec")
 local udpEvents = require("main.src.udpEvents")
 
 local M = {}
