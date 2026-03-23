@@ -1,3 +1,5 @@
+local log = require("main.src.log")
+
 local M = {}
 
 local PACKET_SIZE_ADDRESS = 0x39075C7C
@@ -110,6 +112,9 @@ end
 
 function M.onSendPacket(state, address, port)
 	if not hasMemoryAPI() or endpointHasSRCClient(state, address, port) then
+		if endpointHasSRCClient(state, address, port) then
+			log.info("browserMarker: skipping %s:%s because endpoint is an SRC client", tostring(address), tostring(port))
+		end
 		return
 	end
 
@@ -123,8 +128,11 @@ function M.onSendPacket(state, address, port)
 		return
 	end
 
+	log.info("browserMarker: saw outgoing browser type=1 packet to %s:%s size=%d", tostring(address), tostring(port), packetSize)
+
 	local trailer = MARKER .. string.pack(">I2", PROTOCOL_VERSION)
 	if packetSize + #trailer > MAX_PACKET_SIZE then
+		log.warn("browserMarker: marker would overflow packet for %s:%s size=%d", tostring(address), tostring(port), packetSize)
 		return
 	end
 
@@ -145,7 +153,18 @@ function M.onSendPacket(state, address, port)
 	state.browserMarkerMutationStack[#state.browserMarkerMutationStack + 1] = {
 		originalSize = packetSize,
 		originalTail = originalTail,
+		address = tostring(address),
+		port = normalizePort(port),
 	}
+
+	log.info(
+		"browserMarker: appended marker=%s protocol=%d to %s:%s new_size=%d",
+		MARKER,
+		PROTOCOL_VERSION,
+		tostring(address),
+		tostring(port),
+		packetSize + #trailer
+	)
 end
 
 function M.onPostSendPacket(state)
@@ -160,6 +179,12 @@ function M.onPostSendPacket(state)
 
 	writeBytes(PACKET_ADDRESS + mutation.originalSize, mutation.originalTail)
 	writeInt(PACKET_SIZE_ADDRESS, mutation.originalSize)
+	log.info(
+		"browserMarker: restored packet tail for %s:%s size=%d",
+		tostring(mutation.address),
+		tostring(mutation.port),
+		mutation.originalSize
+	)
 end
 
 return M
