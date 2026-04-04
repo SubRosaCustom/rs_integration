@@ -264,6 +264,35 @@ local function validateBoundPlayer(connection, client)
 	return player
 end
 
+local function isClientSyncing(client)
+	if not client or client.hello ~= true then
+		return false
+	end
+
+	if client.udpEventsReady ~= true then
+		return true
+	end
+
+	if client.activeFileTransfer then
+		return true
+	end
+
+	return type(client.pendingFileRequests) == "table" and #client.pendingFileRequests > 0
+end
+
+local function suppressPlayerTimeoutWhileSyncing(client)
+	if not client or client.bound ~= true or client.player == nil then
+		return
+	end
+
+	local playerConnection = client.player.connection
+	if not playerConnection or not isClientSyncing(client) then
+		return
+	end
+
+	playerConnection.timeoutTime = 0
+end
+
 disconnectOtherConnectionsForPlayer = function(state, player, exceptConnection)
 	if not player then
 		return
@@ -1224,6 +1253,8 @@ local function processClients(state)
 					end
 				end
 			end
+
+			suppressPlayerTimeoutWhileSyncing(client)
 		end
 
 		if connection.isOpen then
