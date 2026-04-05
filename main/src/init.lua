@@ -13,12 +13,12 @@ _G.src = src
 
 itemTypeSync.install(state, src)
 
-local function refreshNow()
+local function refresh_now()
 	shared.discoverSyncFiles(state)
 	src.refresh()
 end
 
-local function disableRuntime(reason)
+local function disable_runtime(reason)
 	src.enabled = false
 	state.enabled = false
 	state.runtimeActive = false
@@ -28,7 +28,7 @@ local function disableRuntime(reason)
 	end
 end
 
-local function applyConfig(isReload)
+local function apply_config(isReload)
 	local raw = nil
 	if type(config) == "table" then
 		raw = config.src
@@ -40,12 +40,12 @@ local function applyConfig(isReload)
 
 	if not state.enabled then
 		if state.runtimeActive then
-			disableRuntime("disabled via config")
+			disable_runtime("disabled via config")
 		end
 		return
 	end
 
-	refreshNow()
+	refresh_now()
 	network.ensureTcpServer(state)
 
 	if not state.runtimeActive then
@@ -62,7 +62,7 @@ function src.refresh()
 end
 
 function src.refreshSyncFiles()
-	refreshNow()
+	refresh_now()
 end
 
 function src.onClientEvent(name, fn)
@@ -133,7 +133,7 @@ end
 
 src.blob = src.binary
 
-local function ensureNonSRCGateHook()
+local function ensure_non_srcgate_hook()
 	if type(hook) ~= "table" or type(hook.add) ~= "function" then
 		log.warn("could not register non-SRC gate hook (hook.add unavailable)")
 		return
@@ -159,10 +159,10 @@ local function ensureNonSRCGateHook()
 end
 
 if not state.hooksRegistered then
-	ensureNonSRCGateHook()
+	ensure_non_srcgate_hook()
 
 	hook.add("ConfigLoaded", "main.src", function(isReload)
-		applyConfig(isReload)
+		apply_config(isReload)
 	end)
 
 	hook.add("Logic", "main.src", function()
@@ -209,7 +209,7 @@ if not state.hooksRegistered then
 	end)
 
 	hook.add("InterruptSignal", "main.src", function()
-		disableRuntime("interrupt signal received")
+		disable_runtime("interrupt signal received")
 	end)
 
 	state.hooksRegistered = true
@@ -217,7 +217,7 @@ end
 
 if not state.moduleLoaded then
 	if type(config) == "table" then
-		applyConfig(false)
+		apply_config(false)
 	else
 		state.config = shared.resolveConfig(nil)
 		state.enabled = state.config.enabled ~= false

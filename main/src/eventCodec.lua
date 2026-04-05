@@ -25,7 +25,7 @@ local band = bitLib.band
 local binaryMetatable = {}
 binaryMetatable.__index = binaryMetatable
 
-local function normalizeBlobOffset(offset, size)
+local function normalize_blob_offset(offset, size)
 	if offset == nil then
 		return 1
 	end
@@ -47,9 +47,9 @@ local function normalizeBlobOffset(offset, size)
 	return offset
 end
 
-local function normalizeBlobRange(bytes, offset, count)
+local function normalize_blob_range(bytes, offset, count)
 	local size = #bytes
-	local startIndex = normalizeBlobOffset(offset, size)
+	local startIndex = normalize_blob_offset(offset, size)
 	if not startIndex then
 		return nil
 	end
@@ -71,7 +71,7 @@ local function normalizeBlobRange(bytes, offset, count)
 	return startIndex, count
 end
 
-local function getBlobBytes(value)
+local function get_blob_bytes(value)
 	if type(value) ~= "table" or getmetatable(value) ~= binaryMetatable then
 		return nil
 	end
@@ -79,7 +79,7 @@ local function getBlobBytes(value)
 end
 
 function binaryMetatable:size()
-	local bytes = getBlobBytes(self)
+	local bytes = get_blob_bytes(self)
 	return bytes and #bytes or 0
 end
 
@@ -87,12 +87,12 @@ binaryMetatable.len = binaryMetatable.size
 binaryMetatable.length = binaryMetatable.size
 
 function binaryMetatable:bytes(offset, count)
-	local bytes = getBlobBytes(self)
+	local bytes = get_blob_bytes(self)
 	if type(bytes) ~= "string" then
 		return nil
 	end
 
-	local startIndex, byteCount = normalizeBlobRange(bytes, offset, count)
+	local startIndex, byteCount = normalize_blob_range(bytes, offset, count)
 	if not startIndex then
 		return nil
 	end
@@ -104,13 +104,13 @@ binaryMetatable.readBytes = binaryMetatable.bytes
 binaryMetatable.readString = binaryMetatable.bytes
 binaryMetatable.raw = binaryMetatable.bytes
 
-local function readBlobValue(blob, offset, width, format)
-	local bytes = getBlobBytes(blob)
+local function read_blob_value(blob, offset, width, format)
+	local bytes = get_blob_bytes(blob)
 	if type(bytes) ~= "string" then
 		return nil
 	end
 
-	local startIndex, byteCount = normalizeBlobRange(bytes, offset, width)
+	local startIndex, byteCount = normalize_blob_range(bytes, offset, width)
 	if not startIndex or byteCount ~= width then
 		return nil
 	end
@@ -124,45 +124,45 @@ local function readBlobValue(blob, offset, width, format)
 end
 
 function binaryMetatable:readByte(offset)
-	return readBlobValue(self, offset, 1, ">b")
+	return read_blob_value(self, offset, 1, ">b")
 end
 
 function binaryMetatable:readUByte(offset)
-	return readBlobValue(self, offset, 1, ">B")
+	return read_blob_value(self, offset, 1, ">B")
 end
 
 binaryMetatable.byte = binaryMetatable.readUByte
 
 function binaryMetatable:readShort(offset)
-	return readBlobValue(self, offset, 2, ">i2")
+	return read_blob_value(self, offset, 2, ">i2")
 end
 
 function binaryMetatable:readUShort(offset)
-	return readBlobValue(self, offset, 2, ">I2")
+	return read_blob_value(self, offset, 2, ">I2")
 end
 
 function binaryMetatable:readInt(offset)
-	return readBlobValue(self, offset, 4, ">i4")
+	return read_blob_value(self, offset, 4, ">i4")
 end
 
 function binaryMetatable:readUInt(offset)
-	return readBlobValue(self, offset, 4, ">I4")
+	return read_blob_value(self, offset, 4, ">I4")
 end
 
 function binaryMetatable:readLong(offset)
-	return readBlobValue(self, offset, 8, ">i8")
+	return read_blob_value(self, offset, 8, ">i8")
 end
 
 function binaryMetatable:readULong(offset)
-	return readBlobValue(self, offset, 8, ">I8")
+	return read_blob_value(self, offset, 8, ">I8")
 end
 
 function binaryMetatable:readFloat(offset)
-	return readBlobValue(self, offset, 4, ">f")
+	return read_blob_value(self, offset, 4, ">f")
 end
 
 function binaryMetatable:readDouble(offset)
-	return readBlobValue(self, offset, 8, ">d")
+	return read_blob_value(self, offset, 8, ">d")
 end
 
 binaryMetatable.sub = binaryMetatable.bytes
@@ -176,7 +176,7 @@ local function u32(value)
 	return value
 end
 
-local function isInteger(value)
+local function is_integer(value)
 	if type(value) ~= "number" then
 		return false
 	end
@@ -216,7 +216,7 @@ local function shl64(hi, lo, shift)
 	return u32((hi * (2 ^ shift)) + math.floor(lo / (2 ^ (32 - shift)))), u32(lo * (2 ^ shift))
 end
 
-local function mulFnvPrime(hi, lo)
+local function mul_fnv_prime(hi, lo)
 	local outHi, outLo = 0, 0
 	for i = 1, #FNV64_SHIFTS do
 		local shiftedHi, shiftedLo = shl64(hi, lo, FNV64_SHIFTS[i])
@@ -225,7 +225,7 @@ local function mulFnvPrime(hi, lo)
 	return outHi, outLo
 end
 
-local function packU32(value)
+local function pack_u32(value)
 	value = u32(value)
 	local b1 = math.floor(value / 0x1000000) % 0x100
 	local b2 = math.floor(value / 0x10000) % 0x100
@@ -234,7 +234,7 @@ local function packU32(value)
 	return string.char(b1, b2, b3, b4)
 end
 
-local function isBlob(value)
+local function is_blob(value)
 	return type(value) == "table" and getmetatable(value) == binaryMetatable
 end
 
@@ -243,13 +243,13 @@ function M.blob(bytes)
 	return setmetatable({ data = bytes }, binaryMetatable)
 end
 
-function M.isBlob(value)
-	return isBlob(value)
+function M.is_blob(value)
+	return is_blob(value)
 end
 
 function M.encode(...)
 	local count = select("#", ...)
-	local parts = { MAGIC, string.char(VERSION), packU32(count) }
+	local parts = { MAGIC, string.char(VERSION), pack_u32(count) }
 
 	for i = 1, count do
 		local value = select(i, ...)
@@ -260,19 +260,19 @@ function M.encode(...)
 		elseif valueType == "boolean" then
 			parts[#parts + 1] = string.char(value and TYPE_TRUE or TYPE_FALSE)
 		elseif valueType == "number" then
-			if isInteger(value) then
+			if is_integer(value) then
 				parts[#parts + 1] = string.char(TYPE_INTEGER) .. string.pack(">i8", math.floor(value))
 			else
 				parts[#parts + 1] = string.char(TYPE_NUMBER) .. string.pack(">d", value)
 			end
 		elseif valueType == "string" then
-			parts[#parts + 1] = string.char(TYPE_STRING) .. packU32(#value) .. value
-		elseif isBlob(value) then
+			parts[#parts + 1] = string.char(TYPE_STRING) .. pack_u32(#value) .. value
+		elseif is_blob(value) then
 			local bytes = rawget(value, "data")
 			if type(bytes) ~= "string" then
 				return nil, "invalid binary payload"
 			end
-			parts[#parts + 1] = string.char(TYPE_BINARY) .. packU32(#bytes) .. bytes
+			parts[#parts + 1] = string.char(TYPE_BINARY) .. pack_u32(#bytes) .. bytes
 		else
 			return nil, "unsupported value type: " .. valueType
 		end
@@ -374,10 +374,10 @@ function M.hashName(name)
 	local lo = FNV64_OFFSET_LO
 	for i = 1, #name do
 		lo = u32(bxor(lo, name:byte(i)))
-		hi, lo = mulFnvPrime(hi, lo)
+		hi, lo = mul_fnv_prime(hi, lo)
 	end
 
-	return packU32(hi) .. packU32(lo)
+	return pack_u32(hi) .. pack_u32(lo)
 end
 
 function M.hex(hashBytes)

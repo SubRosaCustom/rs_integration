@@ -28,7 +28,7 @@ local function active()
 	return p and p.isEnabled and p or nil
 end
 
-local function emitTo(connection, eventName, ...)
+local function emit_to(connection, eventName, ...)
 	local p = active()
 	if not p then
 		return false
@@ -36,7 +36,7 @@ local function emitTo(connection, eventName, ...)
 	return src.emitClientEvent(connection.player, eventName, ...)
 end
 
-local function emitAll(eventName, ...)
+local function emit_all(eventName, ...)
 	local p = active()
 	if not p then
 		return 0
@@ -60,7 +60,7 @@ if not globalState.initialized then
 		end
 
 		p:print("Client hello from " .. tostring(connection.address) .. ":" .. tostring(connection.port))
-		emitTo(connection, "srcc.showcase.welcome", "server acknowledged hello", tickCounter, clientAddress, clientPort)
+		emit_to(connection, "srcc.showcase.welcome", "server acknowledged hello", tickCounter, clientAddress, clientPort)
 	end)
 
 	src.onClientEvent("srcc.showcase.ping", function(connection, reason, localTick)
@@ -69,7 +69,7 @@ if not globalState.initialized then
 			return
 		end
 
-		emitTo(connection, "srcc.showcase.pong", tickCounter, reason or "unknown", localTick or 0)
+		emit_to(connection, "srcc.showcase.pong", tickCounter, reason or "unknown", localTick or 0)
 	end)
 
 	src.onClientEvent("srcc.showcase.request_state", function(connection, requestedAtTick)
@@ -78,9 +78,9 @@ if not globalState.initialized then
 			return
 		end
 
-		local sent = emitAll("srcc.showcase.notice", "A client requested SRCC state (" .. tostring(connection.address) .. ")", tickCounter)
+		local sent = emit_all("srcc.showcase.notice", "A client requested SRCC state (" .. tostring(connection.address) .. ")", tickCounter)
 
-		emitTo(connection, "srcc.showcase.state", tickCounter, sent, requestedAtTick or 0)
+		emit_to(connection, "srcc.showcase.state", tickCounter, sent, requestedAtTick or 0)
 	end)
 
 	src.onClientEvent("srcc.example.ping", function(connection, message, localTick)
@@ -89,7 +89,7 @@ if not globalState.initialized then
 			return
 		end
 
-		emitTo(connection, "srcc.example.echo", "server acknowledged srcc.example.ping", tickCounter, message, localTick or 0)
+		emit_to(connection, "srcc.example.echo", "server acknowledged srcc.example.ping", tickCounter, message, localTick or 0)
 	end)
 end
 
@@ -105,7 +105,7 @@ plugin.commands["/srcshowcase"] = {
 		end
 
 		local message = table.concat(args, " ")
-		local sent = emitAll("srcc.showcase.notice", message, tickCounter)
+		local sent = emit_all("srcc.showcase.notice", message, tickCounter)
 
 		local output = "SRCC showcase notice sent to " .. tostring(sent) .. " client(s)"
 		if ply.sendMessage then
@@ -135,13 +135,13 @@ plugin:addHook("Logic", function()
 	tickCounter = tickCounter + 1
 
 	if oldLevelToLoad ~= server.levelToLoad then
-		emitAll("srcc.showcase.notice", "server.levelToLoad = " .. tostring(server.levelToLoad), tickCounter)
+		emit_all("srcc.showcase.notice", "server.levelToLoad = " .. tostring(server.levelToLoad), tickCounter)
 	end
 	if oldloadedLevel ~= server.loadedLevel then
-		emitAll("srcc.showcase.notice", "server.loadedLevel = " .. tostring(server.loadedLevel), tickCounter)
+		emit_all("srcc.showcase.notice", "server.loadedLevel = " .. tostring(server.loadedLevel), tickCounter)
 	end
 	if oldIsLevelLoaded ~= server.isLevelLoaded then
-		emitAll("srcc.showcase.notice", "server.isLevelLoaded = " .. tostring(server.isLevelLoaded), tickCounter)
+		emit_all("srcc.showcase.notice", "server.isLevelLoaded = " .. tostring(server.isLevelLoaded), tickCounter)
 	end
 
 	oldLevelToLoad = server.levelToLoad
@@ -149,6 +149,6 @@ plugin:addHook("Logic", function()
 	oldIsLevelLoaded = server.isLevelLoaded
 
 	if plugin.config.autoBroadcastNotices and tickCounter % plugin.config.noticeEveryTicks == 0 then
-		emitAll("srcc.showcase.notice", "Periodic server notice tick=" .. tostring(tickCounter), tickCounter)
+		emit_all("srcc.showcase.notice", "Periodic server notice tick=" .. tostring(tickCounter), tickCounter)
 	end
 end)

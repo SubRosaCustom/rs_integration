@@ -12,11 +12,11 @@ local shared = require("main.src.shared")
 local src = assert(_G.src, "SRC utils requires main.src.init to initialize first")
 local state = shared.getState()
 
-local function refreshNow()
+local function refresh_now()
 	src.refreshSyncFiles()
 end
 
-local function countClients()
+local function count_clients()
 	local total = 0
 	local hello = 0
 	local bound = 0
@@ -36,7 +36,7 @@ local function countClients()
 	return total, hello, bound
 end
 
-local function countQueuedBytes(queue)
+local function count_queued_bytes(queue)
 	local total = 0
 	for i = 1, #queue do
 		total = total + #(queue[i] or "")
@@ -51,7 +51,7 @@ plugin.commands["/srcrefresh"] = {
 	end,
 	call = function(ply)
 		assert(src.enabled, "SRC is disabled")
-		refreshNow()
+		refresh_now()
 		local message = "SRC refresh queued for all connected clients"
 		messagePlayerWrap(ply, message)
 	end,
@@ -63,7 +63,7 @@ plugin.commands["/srcstatus"] = {
 		return ply.isConsole or ply.isAdmin
 	end,
 	call = function(ply)
-		local totalClients, helloClients, boundClients = countClients()
+		local totalClients, helloClients, boundClients = count_clients()
 		messagePlayerWrap(
 			ply,
 			string.format(
@@ -146,8 +146,9 @@ plugin.commands["/srcclients"] = {
 	end,
 }
 
-plugin.commands["srcwatch"] = {
+plugin.commands["/srcwatch"] = {
 	info = "Toggle SRC auto-refresh watching for this server process.",
+	alias = { "srcwatch" },
 	canCall = function(ply)
 		return ply.isConsole
 	end,
@@ -174,7 +175,7 @@ plugin.commands["/srcdumpstate"] = {
 		return ply.isConsole or ply.isAdmin
 	end,
 	call = function(ply)
-		local totalClients, helloClients, boundClients = countClients()
+		local totalClients, helloClients, boundClients = count_clients()
 		local totalSendFrames = 0
 		local totalSendBytes = 0
 		local totalPendingFiles = 0
@@ -184,7 +185,7 @@ plugin.commands["/srcdumpstate"] = {
 		for connection, client in pairs(state.clients) do
 			if connection and connection.isOpen and client then
 				totalSendFrames = totalSendFrames + #client.sendQueue
-				totalSendBytes = totalSendBytes + countQueuedBytes(client.sendQueue)
+				totalSendBytes = totalSendBytes + count_queued_bytes(client.sendQueue)
 				totalPendingFiles = totalPendingFiles + #client.pendingFileRequests
 				totalPendingEvents = totalPendingEvents + table.numElements(client.pendingEvents or {})
 				totalAwaitingResults = totalAwaitingResults + table.numElements(client.awaitingResults or {})
@@ -270,7 +271,7 @@ plugin:addHook("Logic", function()
 
 	watcher.ensure(state)
 	watcher.process(state, function()
-		refreshNow()
+		refresh_now()
 		plugin:print("auto-refresh queued")
 	end)
 end)
