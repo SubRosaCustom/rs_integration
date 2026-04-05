@@ -1,8 +1,10 @@
-# Sub Rosa: Custom RS Integration
+# Sub Rosa: Custom RosaServer Integration
 
 `rs_integration` is the server-side integration layer for SRC on RosaServer.
 
-If you want client-side modding support or SRC-enabled clients at all, this repository is required. It plugs into RosaServer, exposes the SRC networking/runtime helpers on the server, and delivers scripts/assets/client metadata to connected SRC clients.
+## TL;DR
+If you want SRC clients to actually work on a RosaServer deployment, this module is required.
+It owns the server-side transport, sync pipeline, and runtime coordination for SRC.
 
 ## What It Does
 
@@ -11,25 +13,19 @@ If you want client-side modding support or SRC-enabled clients at all, this repo
 - exposing the SRC server runtime inside RosaServer
 - accepting and managing SRC TCP client connections
 - sending script indexes and file chunks
-- syncing client assets from `clientRoot`
+- syncing client assets from `clientRoot` (default `subrosacustom`)
 - bridging client/server custom events
 - syncing custom item types and related metadata
 - refreshing synced client content during development
 
-This repository is the server half of SRC. It is not the native client mod, and it is not the standard client Lua implementation.
+This repository is the server half of SRC. It is not the native client mod, and it is not the standard client Lua implementation (that is [Sub Rosa: Custom Core](https://github.com/SubRosaCustom/core)).
 
-## Why It Matters
+## Runtime Notes
 
-There is no serious SRC deployment without `rs_integration`.
-
-It is the piece that enables:
-
-- client-side scripting delivered from the server
-- synced client assets
-- SRC handshake/state management
-- server-driven custom item/client metadata sync
-
-Without it, RosaServer does not know how to talk to the SRC client mod.
+- SRC currently uses a TCP control/sync channel plus UDP batched event transport.
+- Server-owned reliable event IDs are allocated in the unsigned range `0x80000000` to `0xFFFFFFFF` to avoid client/server ID collisions.
+- `plugins/srcutils.lua` exposes `/srcwatch` and supports `srcwatch` as an alias.
+- Internal Lua helpers in this repo are now normalized to `snake_case`; API-facing names are preserved for compatibility with existing configs/plugins.
 
 ## Project Layout
 
@@ -38,7 +34,7 @@ Without it, RosaServer does not know how to talk to the SRC client mod.
 - `main/src/shared.lua` owns config, paths, and shared state
 - `main/src/itemTypes.lua` owns custom item type sync helpers
 - `main/src/watcher.lua` owns the watcher helper used by SRC utility plugins
-- `plugins/srcutils.lua` owns `/srcrefresh` and optional auto-refresh behavior
+- `plugins/srcutils.lua` owns `/srcrefresh`, `/srcstatus`, `/srcclients`, `/srcwatch`, `/srcdumpstate`, and `/srckicknonsrc`
 - `plugins/srccShowcase.lua` is an example server plugin
 
 ## Configuration
@@ -81,7 +77,7 @@ That typically means:
 
 ## Related Repositories
 
-- [`client`](https://github.com/SubRosaCustom/client): the native SRC client mod
-- [`core`](https://github.com/SubRosaCustom/core): optional standard client-side Lua implementation typically synced through this repo
+- [`client`](https://github.com/SubRosaCustom/client): native SRC client mod
+- [`core`](https://github.com/SubRosaCustom/core): optional (recommended) standard client-side Lua runtime usually synced through this repo
 - [`RosaServer`](https://github.com/jpxs-intl/RosaServer): upstream dedicated server
-- [`RosaServerCore`](https://github.com/jpxs-intl/RosaServerCore): upstream standard server Lua framework
+- [`RosaServerCore`](https://github.com/jpxs-intl/RosaServerCore): upstream server Lua framework
