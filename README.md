@@ -77,7 +77,7 @@ That typically means:
 
 ## Related Repositories
 
-- [`client`](https://github.com/SubRosaCustom/client): native SRC client mod
+- [`client`](https://github.com/SubRosaCustom/client): Sub Rosa: Custom client mod, as of writing this not public to avoid development of cheats
 - [`core`](https://github.com/SubRosaCustom/core): optional (recommended) standard client-side Lua runtime usually synced through this repo
-- [`RosaServer`](https://github.com/jpxs-intl/RosaServer): upstream dedicated server
-- [`RosaServerCore`](https://github.com/jpxs-intl/RosaServerCore): upstream server Lua framework
+- [`RosaServer`](https://github.com/jpxs-intl/RosaServer)
+- [`RosaServerCore`](https://github.com/jpxs-intl/RosaServerCore)
