@@ -13,12 +13,12 @@ _G.src = src
 
 itemTypeSync.install(state, src)
 
-local function refresh_now()
+local function refreshNow()
 	shared.discoverSyncFiles(state)
 	src.refresh()
 end
 
-local function disable_runtime(reason)
+local function disableRuntime(reason)
 	src.enabled = false
 	state.enabled = false
 	state.runtimeActive = false
@@ -28,7 +28,7 @@ local function disable_runtime(reason)
 	end
 end
 
-local function apply_config(isReload)
+local function applyConfig(isReload)
 	local raw = nil
 	if type(config) == "table" then
 		raw = config.src
@@ -40,12 +40,12 @@ local function apply_config(isReload)
 
 	if not state.enabled then
 		if state.runtimeActive then
-			disable_runtime("disabled via config")
+			disableRuntime("disabled via config")
 		end
 		return
 	end
 
-	refresh_now()
+	refreshNow()
 	network.ensureTcpServer(state)
 
 	if not state.runtimeActive then
@@ -62,7 +62,7 @@ function src.refresh()
 end
 
 function src.refreshSyncFiles()
-	refresh_now()
+	refreshNow()
 end
 
 function src.onClientEvent(name, fn)
@@ -103,7 +103,7 @@ end
 -- by itemTypeSync.install() above; they are defined in itemTypes.lua
 
 function src.getClientState(player)
-	local connection = network.getPlayerConnection(player)
+	local connection = network.getPlayerConnection(state, player)
 	local client = connection and state.clients[connection] or nil
 	local connected = connection and connection.isOpen and client ~= nil or false
 
@@ -133,7 +133,7 @@ end
 
 src.blob = src.binary
 
-local function ensure_non_srcgate_hook()
+local function ensureNonSRCGateHook()
 	if type(hook) ~= "table" or type(hook.add) ~= "function" then
 		log.warn("could not register non-SRC gate hook (hook.add unavailable)")
 		return
@@ -159,10 +159,10 @@ local function ensure_non_srcgate_hook()
 end
 
 if not state.hooksRegistered then
-	ensure_non_srcgate_hook()
+	ensureNonSRCGateHook()
 
 	hook.add("ConfigLoaded", "main.src", function(isReload)
-		apply_config(isReload)
+		applyConfig(isReload)
 	end)
 
 	hook.add("Logic", "main.src", function()
@@ -209,7 +209,7 @@ if not state.hooksRegistered then
 	end)
 
 	hook.add("InterruptSignal", "main.src", function()
-		disable_runtime("interrupt signal received")
+		disableRuntime("interrupt signal received")
 	end)
 
 	state.hooksRegistered = true
@@ -217,7 +217,7 @@ end
 
 if not state.moduleLoaded then
 	if type(config) == "table" then
-		apply_config(false)
+		applyConfig(false)
 	else
 		state.config = shared.resolveConfig(nil)
 		state.enabled = state.config.enabled ~= false

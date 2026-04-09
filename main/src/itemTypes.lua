@@ -8,7 +8,7 @@ local MAX_ITEM_TYPE_COUNT = 255
 local MAX_ITEM_TYPE_INDEX = MAX_ITEM_TYPE_COUNT - 1
 local FIRST_CUSTOM_INDEX = 46
 
-local function safe_read(obj, key)
+local function safeRead(obj, key)
 	local ok, value = pcall(function()
 		return obj[key]
 	end)
@@ -18,13 +18,13 @@ local function safe_read(obj, key)
 	return value
 end
 
-local function safe_write(obj, key, value)
+local function safeWrite(obj, key, value)
 	pcall(function()
 		obj[key] = value
 	end)
 end
 
-local function normalize_index(index, minValue, maxValue)
+local function normalizeIndex(index, minValue, maxValue)
 	if type(index) ~= "number" or index ~= index then
 		return nil
 	end
@@ -37,22 +37,22 @@ local function normalize_index(index, minValue, maxValue)
 	return index
 end
 
-local function has_memory_read_api()
+local function hasMemoryReadAPI()
 	return type(memory) == "table"
 		and type(memory.getAddress) == "function"
 		and type(memory.readBytes) == "function"
 end
 
-local function has_memory_write_api()
-	return has_memory_read_api() and type(memory.writeBytes) == "function"
+local function hasMemoryWriteAPI()
+	return hasMemoryReadAPI() and type(memory.writeBytes) == "function"
 end
 
-local function is_item_type_userdata(value)
-	return type(value) == "userdata" and safe_read(value, "class") == "ItemType"
+local function isItemTypeUserdata(value)
+	return type(value) == "userdata" and safeRead(value, "class") == "ItemType"
 end
 
-local function get_item_type_by_index(index)
-	local normalized = normalize_index(index, 0, MAX_ITEM_TYPE_INDEX)
+local function getItemTypeByIndex(index)
+	local normalized = normalizeIndex(index, 0, MAX_ITEM_TYPE_INDEX)
 	if normalized == nil then
 		return nil
 	end
@@ -67,20 +67,20 @@ local function get_item_type_by_index(index)
 	return value
 end
 
-local function get_item_type_index(ref)
-	if is_item_type_userdata(ref) then
-		return normalize_index(safe_read(ref, "index"), 0, MAX_ITEM_TYPE_INDEX)
+local function getItemTypeIndex(ref)
+	if isItemTypeUserdata(ref) then
+		return normalizeIndex(safeRead(ref, "index"), 0, MAX_ITEM_TYPE_INDEX)
 	end
 
 	if type(ref) == "number" then
-		return normalize_index(ref, 0, MAX_ITEM_TYPE_INDEX)
+		return normalizeIndex(ref, 0, MAX_ITEM_TYPE_INDEX)
 	end
 
 	return nil
 end
 
-local function get_item_type_address(itemType)
-	if not has_memory_read_api() then
+local function getItemTypeAddress(itemType)
+	if not hasMemoryReadAPI() then
 		return nil, "memory read api unavailable"
 	end
 
@@ -92,8 +92,8 @@ local function get_item_type_address(itemType)
 	return address
 end
 
-local function read_item_type_bytes_from_address(address)
-	if not has_memory_read_api() then
+local function readItemTypeBytesFromAddress(address)
+	if not hasMemoryReadAPI() then
 		return nil, "memory read api unavailable"
 	end
 
@@ -109,8 +109,8 @@ local function read_item_type_bytes_from_address(address)
 	return bytesOrErr
 end
 
-local function write_item_type_bytes(address, bytes)
-	if not has_memory_write_api() then
+local function writeItemTypeBytes(address, bytes)
+	if not hasMemoryWriteAPI() then
 		return false, "memory write api unavailable"
 	end
 
@@ -122,13 +122,13 @@ local function write_item_type_bytes(address, bytes)
 	return true
 end
 
-local function resolve_item_type(ref)
-	if is_item_type_userdata(ref) then
+local function resolveItemType(ref)
+	if isItemTypeUserdata(ref) then
 		return ref
 	end
 
 	if type(ref) == "number" then
-		return get_item_type_by_index(ref)
+		return getItemTypeByIndex(ref)
 	end
 
 	if type(ref) == "string" and ref ~= "" and type(itemTypes.getByName) == "function" then
@@ -141,33 +141,33 @@ local function resolve_item_type(ref)
 	return nil
 end
 
-local function copy_vector(dst, src)
+local function copyVector(dst, src)
 	if not dst or not src then
 		return
 	end
 
-	local x = safe_read(src, "x")
-	local y = safe_read(src, "y")
-	local z = safe_read(src, "z")
+	local x = safeRead(src, "x")
+	local y = safeRead(src, "y")
+	local z = safeRead(src, "z")
 
 	if type(x) == "number" then
-		safe_write(dst, "x", x)
+		safeWrite(dst, "x", x)
 	end
 	if type(y) == "number" then
-		safe_write(dst, "y", y)
+		safeWrite(dst, "y", y)
 	end
 	if type(z) == "number" then
-		safe_write(dst, "z", z)
+		safeWrite(dst, "z", z)
 	end
 end
 
-local function value_looks_like_vector(value)
+local function valueLooksLikeVector(value)
 	return type(value) == "table"
 		and (type(value.x) == "number" or type(value.y) == "number" or type(value.z) == "number")
 end
 
-local function apply_can_mount_to_overrides(targetType, canMountToOverrides)
-	if not is_item_type_userdata(targetType) or type(canMountToOverrides) ~= "table" then
+local function applyCanMountToOverrides(targetType, canMountToOverrides)
+	if not isItemTypeUserdata(targetType) or type(canMountToOverrides) ~= "table" then
 		return
 	end
 
@@ -177,7 +177,7 @@ local function apply_can_mount_to_overrides(targetType, canMountToOverrides)
 			break
 		end
 
-		local parentType = get_item_type_by_index(parentIndex)
+		local parentType = getItemTypeByIndex(parentIndex)
 		if parentType then
 			local value = canMountToOverrides[i]
 			local allowed = value == true or value == 1
@@ -186,28 +186,28 @@ local function apply_can_mount_to_overrides(targetType, canMountToOverrides)
 	end
 end
 
-local function apply_clone_overrides(targetType, overrides)
-	if not is_item_type_userdata(targetType) or type(overrides) ~= "table" then
+local function applyCloneOverrides(targetType, overrides)
+	if not isItemTypeUserdata(targetType) or type(overrides) ~= "table" then
 		return
 	end
 
 	for key, value in pairs(overrides) do
 		if key ~= "canMountTo" and type(key) == "string" then
-			if value_looks_like_vector(value) then
-				local dstVector = safe_read(targetType, key)
+			if valueLooksLikeVector(value) then
+				local dstVector = safeRead(targetType, key)
 				if dstVector then
-					copy_vector(dstVector, value)
+					copyVector(dstVector, value)
 				end
 			elseif type(value) == "number" or type(value) == "boolean" or type(value) == "string" then
-				safe_write(targetType, key, value)
+				safeWrite(targetType, key, value)
 			end
 		end
 	end
 
-	apply_can_mount_to_overrides(targetType, overrides.canMountTo)
+	applyCanMountToOverrides(targetType, overrides.canMountTo)
 end
 
-local function build_sync_payload(state)
+local function buildSyncPayload(state)
 	local entriesByIndex = state.customItemTypesByIndex or {}
 	local itemTypeEntries = {}
 
@@ -250,7 +250,7 @@ local function build_sync_payload(state)
 	}
 end
 
-local function emit_sync_payload(src, payload, player)
+local function emitSyncPayload(src, payload, player)
 	if type(src) ~= "table" or type(src.syncClientItemTypes) ~= "function" then
 		return false
 	end
@@ -276,20 +276,20 @@ local function emit_sync_payload(src, payload, player)
 	return sent and true or false
 end
 
-local function broadcast_custom_item_types(state, src)
-	local payload = build_sync_payload(state)
+local function broadcastCustomItemTypes(state, src)
+	local payload = buildSyncPayload(state)
 	if payload then
-		emit_sync_payload(src, payload, nil)
+		emitSyncPayload(src, payload, nil)
 	end
 end
 
-local function snapshot_custom_item_type(state, targetType, sourceIndex)
-	local targetIndex = get_item_type_index(targetType)
+local function snapshotCustomItemType(state, targetType, sourceIndex)
+	local targetIndex = getItemTypeIndex(targetType)
 	if targetIndex == nil then
 		return false
 	end
 
-	local address, addrErr = get_item_type_address(targetType)
+	local address, addrErr = getItemTypeAddress(targetType)
 	if not address then
 		if not state.itemTypeSyncMemoryWarningShown then
 			state.itemTypeSyncMemoryWarningShown = true
@@ -298,7 +298,7 @@ local function snapshot_custom_item_type(state, targetType, sourceIndex)
 		return false
 	end
 
-	local bytes, readErr = read_item_type_bytes_from_address(address)
+	local bytes, readErr = readItemTypeBytesFromAddress(address)
 	if not bytes then
 		if not state.itemTypeSyncMemoryWarningShown then
 			state.itemTypeSyncMemoryWarningShown = true
@@ -318,7 +318,7 @@ local function snapshot_custom_item_type(state, targetType, sourceIndex)
 	return true
 end
 
-local function allocate_next_custom_index(state)
+local function allocateNextCustomIndex(state)
 	local entriesByIndex = state.customItemTypesByIndex or {}
 	local nextIndex = state.nextCustomItemTypeIndex or FIRST_CUSTOM_INDEX
 
@@ -334,12 +334,12 @@ local function allocate_next_custom_index(state)
 	return nextIndex
 end
 
-local function normalize_custom_index(index)
-	return normalize_index(index, FIRST_CUSTOM_INDEX, MAX_ITEM_TYPE_INDEX)
+local function normalizeCustomIndex(index)
+	return normalizeIndex(index, FIRST_CUSTOM_INDEX, MAX_ITEM_TYPE_INDEX)
 end
 
-local function clone_item_type(state, src, sourceRef, targetIndex, overrides)
-	local sourceType = resolve_item_type(sourceRef)
+local function cloneItemType(state, src, sourceRef, targetIndex, overrides)
+	local sourceType = resolveItemType(sourceRef)
 	assert(sourceType ~= nil, "itemTypes.clone: invalid source item type")
 
 	if type(targetIndex) == "table" and overrides == nil then
@@ -348,44 +348,44 @@ local function clone_item_type(state, src, sourceRef, targetIndex, overrides)
 	end
 
 	if targetIndex == nil then
-		local allocatedIndex, allocErr = allocate_next_custom_index(state)
+		local allocatedIndex, allocErr = allocateNextCustomIndex(state)
 		assert(allocatedIndex ~= nil, "itemTypes.clone: " .. tostring(allocErr))
 		targetIndex = allocatedIndex
 	end
 
-	local normalizedTargetIndex = normalize_custom_index(targetIndex)
+	local normalizedTargetIndex = normalizeCustomIndex(targetIndex)
 	assert(normalizedTargetIndex ~= nil, "itemTypes.clone: invalid target index " .. tostring(targetIndex))
 
 	if normalizedTargetIndex >= (state.nextCustomItemTypeIndex or FIRST_CUSTOM_INDEX) then
 		state.nextCustomItemTypeIndex = normalizedTargetIndex + 1
 	end
 
-	local targetType = get_item_type_by_index(normalizedTargetIndex)
+	local targetType = getItemTypeByIndex(normalizedTargetIndex)
 	assert(targetType ~= nil, "itemTypes.clone: failed to resolve target item type at index " .. tostring(normalizedTargetIndex))
 
-	local sourceAddress, sourceAddrErr = get_item_type_address(sourceType)
+	local sourceAddress, sourceAddrErr = getItemTypeAddress(sourceType)
 	assert(sourceAddress, "itemTypes.clone: failed to get source address (" .. tostring(sourceAddrErr) .. ")")
 
-	local targetAddress, targetAddrErr = get_item_type_address(targetType)
+	local targetAddress, targetAddrErr = getItemTypeAddress(targetType)
 	assert(targetAddress, "itemTypes.clone: failed to get target address (" .. tostring(targetAddrErr) .. ")")
 
-	local sourceBytes, readErr = read_item_type_bytes_from_address(sourceAddress)
+	local sourceBytes, readErr = readItemTypeBytesFromAddress(sourceAddress)
 	assert(sourceBytes, "itemTypes.clone: failed to read source bytes (" .. tostring(readErr) .. ")")
 
-	local okWrite, writeErr = write_item_type_bytes(targetAddress, sourceBytes)
+	local okWrite, writeErr = writeItemTypeBytes(targetAddress, sourceBytes)
 	assert(okWrite, "itemTypes.clone: failed writing target bytes (" .. tostring(writeErr) .. ")")
 
-	apply_clone_overrides(targetType, overrides)
+	applyCloneOverrides(targetType, overrides)
 
-	local sourceIndex = get_item_type_index(sourceType)
-	if snapshot_custom_item_type(state, targetType, sourceIndex) then
-		broadcast_custom_item_types(state, src)
+	local sourceIndex = getItemTypeIndex(sourceType)
+	if snapshotCustomItemType(state, targetType, sourceIndex) then
+		broadcastCustomItemTypes(state, src)
 	end
 
 	return targetType
 end
 
-local function run_init_item_type_hook(state, src)
+local function runInitItemTypeHook(state, src)
 	if state.itemTypeInitHookRan then
 		return
 	end
@@ -398,10 +398,10 @@ local function run_init_item_type_hook(state, src)
 		end
 	end
 
-	broadcast_custom_item_types(state, src)
+	broadcastCustomItemTypes(state, src)
 end
 
-local function normalize_fire_sound_paths(soundPaths)
+local function normalizeFireSoundPaths(soundPaths)
 	if type(soundPaths) == "string" then
 		assert(soundPaths ~= "", "src.setItemTypeFireSounds: sound ref must be non-empty")
 		local trimmed = soundPaths:match("^%s*(.-)%s*$")
@@ -449,7 +449,7 @@ local BUILTIN_TEXTURE_NAMES = {
 	tex_2 = true,
 }
 
-local function normalize_texture_assignment(textureRef)
+local function normalizeTextureAssignment(textureRef)
 	assert(type(textureRef) == "string" and textureRef ~= "", "src.setItemTypeTexture: texture ref must be a non-empty string")
 
 	local trimmed = textureRef:match("^%s*(.-)%s*$")
@@ -487,28 +487,28 @@ function M.install(state, src)
 	state.itemTypeTextureAssignments = state.itemTypeTextureAssignments or {}
 	state.itemTypeFireSoundAssignments = state.itemTypeFireSoundAssignments or {}
 	state.buildCustomItemTypesSyncPayload = function()
-		return build_sync_payload(state)
+		return buildSyncPayload(state)
 	end
 
 	itemTypes.clone = function(sourceRef, targetIndexOrOverrides, overrides)
-		return clone_item_type(state, src, sourceRef, targetIndexOrOverrides, overrides)
+		return cloneItemType(state, src, sourceRef, targetIndexOrOverrides, overrides)
 	end
 	itemTypes.create = nil
 
 	if type(src) == "table" then
 		if type(src.syncCustomItemTypes) ~= "function" then
 			src.syncCustomItemTypes = function(player)
-				local payload = build_sync_payload(state)
+				local payload = buildSyncPayload(state)
 				if not payload then
 					return false
 				end
-				return emit_sync_payload(src, payload, player)
+				return emitSyncPayload(src, payload, player)
 			end
 		end
 
 		if type(src.setItemTypeModel) ~= "function" then
 			src.setItemTypeModel = function(indexOrType, modelName, player)
-				local targetIndex = get_item_type_index(indexOrType)
+				local targetIndex = getItemTypeIndex(indexOrType)
 				assert(type(targetIndex) == "number",
 					"src.setItemTypeModel(indexOrItemType, modelName, player?): first arg must be number or ItemType")
 
@@ -528,7 +528,7 @@ function M.install(state, src)
 
 		if type(src.setItemTypeIcon) ~= "function" then
 			src.setItemTypeIcon = function(indexOrType, iconPath, player)
-				local targetIndex = get_item_type_index(indexOrType)
+				local targetIndex = getItemTypeIndex(indexOrType)
 				assert(type(targetIndex) == "number",
 					"src.setItemTypeIcon(indexOrItemType, iconPath, player?): first arg must be number or ItemType")
 
@@ -548,7 +548,7 @@ function M.install(state, src)
 
 		if type(src.setItemTypeTexture) ~= "function" then
 			src.setItemTypeTexture = function(indexOrType, textureRef, player)
-				local targetIndex = get_item_type_index(indexOrType)
+				local targetIndex = getItemTypeIndex(indexOrType)
 				assert(type(targetIndex) == "number",
 					"src.setItemTypeTexture(indexOrItemType, textureRef, player?): first arg must be number or ItemType")
 
@@ -559,7 +559,7 @@ function M.install(state, src)
 					assert(not player.isBot, "src.setItemTypeTexture: player cannot be a bot")
 				end
 
-				local normalizedTexture = normalize_texture_assignment(textureRef)
+				local normalizedTexture = normalizeTextureAssignment(textureRef)
 				state.itemTypeTextureAssignments[targetIndex] = normalizedTexture
 
 				local network = require("main.src.network")
@@ -569,7 +569,7 @@ function M.install(state, src)
 
 		if type(src.setItemTypeFireSounds) ~= "function" then
 			src.setItemTypeFireSounds = function(indexOrType, soundPaths, player)
-				local targetIndex = get_item_type_index(indexOrType)
+				local targetIndex = getItemTypeIndex(indexOrType)
 				assert(type(targetIndex) == "number",
 					"src.setItemTypeFireSounds(indexOrItemType, soundPaths, player?): first arg must be number or ItemType")
 
@@ -582,7 +582,7 @@ function M.install(state, src)
 					assert(not player.isBot, "src.setItemTypeFireSounds: player cannot be a bot")
 				end
 
-				local normalizedSoundPaths = normalize_fire_sound_paths(soundPaths)
+				local normalizedSoundPaths = normalizeFireSoundPaths(soundPaths)
 				state.itemTypeFireSoundAssignments[targetIndex] = normalizedSoundPaths
 
 				local network = require("main.src.network")
@@ -591,24 +591,24 @@ function M.install(state, src)
 		end
 	end
 
-	local function schedule_init_hook()
+	local function scheduleInitHook()
 		if type(hook) == "table" and type(hook.once) == "function" then
 			hook.once("Logic", function()
-				run_init_item_type_hook(state, src)
+				runInitItemTypeHook(state, src)
 			end)
 			return
 		end
 
-		run_init_item_type_hook(state, src)
+		runInitItemTypeHook(state, src)
 	end
 
 	if type(hook) == "table" and type(hook.add) == "function" then
 		hook.add("ConfigLoaded", "main.src.itemTypes.init", function()
-			schedule_init_hook()
+			scheduleInitHook()
 		end)
-		schedule_init_hook()
+		scheduleInitHook()
 	else
-		run_init_item_type_hook(state, src)
+		runInitItemTypeHook(state, src)
 	end
 
 	state.itemTypesAPIInstalled = true

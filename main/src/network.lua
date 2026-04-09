@@ -7,11 +7,13 @@ local udpEvents = require("main.src.udpEvents")
 
 local M = {}
 local BINARY_MAGIC = "SRCB"
+local SERVER_EVENT_ID_MIN = 0x80000000
+local SERVER_EVENT_ID_MAX = 0xFFFFFFFF
 local disconnectOtherConnectionsForPlayer
 local loggedLegacyTcpEventFrame = false
 local unpackFn = table.unpack or unpack
 
-local function parse_positive_integer(value)
+local function parsePositiveInteger(value)
 	if type(value) == "number" then
 		local num = math.floor(value)
 		if num > 0 then
@@ -33,7 +35,7 @@ local function parse_positive_integer(value)
 	return nil
 end
 
-local function encode_binary_frame(frameType, payload)
+local function encodeBinaryFrame(frameType, payload)
 	if type(frameType) ~= "string" or frameType == "" then
 		return nil
 	end
@@ -45,7 +47,7 @@ local function encode_binary_frame(frameType, payload)
 	return string.pack(">c4I2I4", BINARY_MAGIC, #frameType, #payload) .. frameType .. payload
 end
 
-local function parse_msg_id(value)
+local function parseMsgId(value)
 	if type(value) == "number" then
 		local id = math.floor(value)
 		if id > 0 then
@@ -67,22 +69,19 @@ local function parse_msg_id(value)
 	return nil
 end
 
-local SERVER_EVENT_ID_MIN = 0x80000000
-local SERVER_EVENT_ID_MAX = 0xFFFFFFFF
-
-local function ensure_event_tracking_tables(client)
+local function ensureEventTrackingTables(client)
 	client.awaitingResults = client.awaitingResults or {}
 	client.earlyResults = client.earlyResults or {}
 	client.recentCompleted = client.recentCompleted or {}
 	client.pendingResults = client.pendingResults or {}
 end
 
-local function mark_event_recently_completed(state, client, msgId)
+local function markEventRecentlyCompleted(state, client, msgId)
 	local keepTicks = math.max(120, tonumber(state.config.eventProcessTimeoutTicks) or 180)
 	client.recentCompleted[msgId] = state.tick + keepTicks
 end
 
-local function cleanup_recent_completions(state, client)
+local function cleanupRecentCompletions(state, client)
 	for msgId, expiryTick in pairs(client.recentCompleted) do
 		if state.tick >= expiryTick then
 			client.recentCompleted[msgId] = nil
@@ -90,7 +89,7 @@ local function cleanup_recent_completions(state, client)
 	end
 end
 
-local function log_event_result(state, connection, name, msgId, result)
+local function logEventResult(state, connection, name, msgId, result)
 	local args = result and result.args or nil
 	local status = tostring((args and args[1]) or result and result.status or "")
 	local handled = tonumber((args and args[2]) or result and result.handled) or 0
@@ -121,7 +120,7 @@ local function log_event_result(state, connection, name, msgId, result)
 	end
 end
 
-local function get_player_connection(state, player)
+local function getPlayerConnection(state, player)
 	if not state or not player then
 		return nil
 	end
@@ -141,7 +140,7 @@ local function get_player_connection(state, player)
 	return nil
 end
 
-local function resolve_client_player_from_hello(_, connection, payload)
+local function resolveClientPlayerFromHello(_, connection, payload)
 	if not connection then
 		return nil, "missing_connection"
 	end
@@ -150,8 +149,8 @@ local function resolve_client_player_from_hello(_, connection, payload)
 		return nil, "invalid_hello_payload"
 	end
 
-	local phoneNumber = parse_positive_integer(payload.phoneNumber or payload.phone)
-	local subRosaID = parse_positive_integer(payload.subRosaID or payload.subrosaID or payload.subrosa_id)
+	local phoneNumber = parsePositiveInteger(payload.phoneNumber or payload.phone)
+	local subRosaID = parsePositiveInteger(payload.subRosaID or payload.subrosaID or payload.subrosa_id)
 	if not phoneNumber and not subRosaID then
 		return nil, "missing_bind_claims"
 	end
@@ -184,7 +183,7 @@ local function resolve_client_player_from_hello(_, connection, payload)
 	return bestPlayer, nil
 end
 
-local function apply_bound_player(state, connection, client, player)
+local function applyBoundPlayer(state, connection, client, player)
 	if not state or not connection or not client or not player then
 		return false
 	end
@@ -196,7 +195,7 @@ local function apply_bound_player(state, connection, client, player)
 	return true
 end
 
-local function close_client_transfer(client)
+local function closeClientTransfer(client)
 	if client and client.activeFileTransfer and client.activeFileTransfer.file then
 		pcall(function()
 			client.activeFileTransfer.file:close()
@@ -207,12 +206,12 @@ local function close_client_transfer(client)
 	end
 end
 
-local function reset_client_sync_state(client)
+local function resetClientSyncState(client)
 	if not client then
 		return
 	end
 
-	close_client_transfer(client)
+	closeClientTransfer(client)
 	client.pendingFileRequests = {}
 	client.pendingEvents = {}
 	client.pendingResults = {}
@@ -224,42 +223,42 @@ local function reset_client_sync_state(client)
 	udpEvents.resetClient(client)
 end
 
-local function clear_client_binding(client)
+local function clearClientBinding(client)
 	if not client then
 		return
 	end
 
-	reset_client_sync_state(client)
+	resetClientSyncState(client)
 	client.player = nil
 	client.bound = false
 end
 
-local function validate_bound_player(connection, client)
+local function validateBoundPlayer(connection, client)
 	if not connection or not client or not client.player then
 		return nil
 	end
 
 	local player = client.player
 	if player.isBot or not player.connection then
-		clear_client_binding(client)
+		clearClientBinding(client)
 		return nil
 	end
 
 	if tostring(player.connection.address) ~= tostring(connection.address) then
-		clear_client_binding(client)
+		clearClientBinding(client)
 		return nil
 	end
 
 	if client.helloPayload then
-		local phoneNumber = parse_positive_integer(client.helloPayload.phoneNumber or client.helloPayload.phone)
+		local phoneNumber = parsePositiveInteger(client.helloPayload.phoneNumber or client.helloPayload.phone)
 		local subRosaID =
-			parse_positive_integer(client.helloPayload.subRosaID or client.helloPayload.subrosaID or client.helloPayload.subrosa_id)
+			parsePositiveInteger(client.helloPayload.subRosaID or client.helloPayload.subrosaID or client.helloPayload.subrosa_id)
 		if phoneNumber and tonumber(player.phoneNumber) ~= phoneNumber then
-			clear_client_binding(client)
+			clearClientBinding(client)
 			return nil
 		end
 		if subRosaID and tonumber(player.subRosaID) ~= subRosaID then
-			clear_client_binding(client)
+			clearClientBinding(client)
 			return nil
 		end
 	end
@@ -267,7 +266,29 @@ local function validate_bound_player(connection, client)
 	return player
 end
 
-local function is_client_syncing(client)
+local function refreshClientPlayerBinding(state, connection, client)
+	if not state or not connection or not client then
+		return nil
+	end
+
+	local player = validateBoundPlayer(connection, client)
+	if player then
+		return player
+	end
+
+	if client.hello ~= true then
+		return nil
+	end
+
+	local reboundPlayer, _ = resolveClientPlayerFromHello(state, connection, client.helloPayload)
+	if reboundPlayer and applyBoundPlayer(state, connection, client, reboundPlayer) then
+		return reboundPlayer
+	end
+
+	return nil
+end
+
+local function isClientSyncing(client)
 	if not client or client.hello ~= true then
 		return false
 	end
@@ -283,13 +304,13 @@ local function is_client_syncing(client)
 	return type(client.pendingFileRequests) == "table" and #client.pendingFileRequests > 0
 end
 
-local function suppress_player_timeout_while_syncing(client)
+local function suppressPlayerTimeoutWhileSyncing(client)
 	if not client or client.bound ~= true or client.player == nil then
 		return
 	end
 
 	local playerConnection = client.player.connection
-	if not playerConnection or not is_client_syncing(client) then
+	if not playerConnection or not isClientSyncing(client) then
 		return
 	end
 
@@ -303,26 +324,26 @@ disconnectOtherConnectionsForPlayer = function(state, player, exceptConnection)
 
 	for connection, client in pairs(state.clients) do
 		if connection ~= exceptConnection and client and client.player == player then
-			reset_client_sync_state(client)
+			resetClientSyncState(client)
 			client.closeAfterFlush = true
 		end
 	end
 end
 
-local function next_sync_generation(state)
+local function nextSyncGeneration(state)
 	local current = tonumber(state.syncGeneration) or 0
 	current = current + 1
 	state.syncGeneration = current
 	return current
 end
 
-local function clear_client_state(state, connection)
+local function clearClientState(state, connection)
 	local client = state.clients[connection]
-	close_client_transfer(client)
+	closeClientTransfer(client)
 	state.clients[connection] = nil
 end
 
-local function enqueue_bytes(state, connection, bytes)
+local function enqueueBytes(state, connection, bytes)
 	local client = state.clients[connection]
 	if not client or type(bytes) ~= "string" or #bytes == 0 then
 		return false
@@ -332,16 +353,16 @@ local function enqueue_bytes(state, connection, bytes)
 	return true
 end
 
-local function enqueue_frame(state, connection, frameType, payload)
+local function enqueueFrame(state, connection, frameType, payload)
 	local body = {
 		type = frameType,
 		payload = payload or {},
 	}
 
-	return enqueue_bytes(state, connection, json.encode(body) .. "\n")
+	return enqueueBytes(state, connection, json.encode(body) .. "\n")
 end
 
-local function flush_send_queue(state, connection)
+local function flushSendQueue(state, connection)
 	local client = state.clients[connection]
 	if not client or not connection.isOpen then
 		return
@@ -381,7 +402,7 @@ local function flush_send_queue(state, connection)
 	end
 end
 
-local function queue_sync_file(state, connection, relPath)
+local function queueSyncFile(state, connection, relPath)
 	local client = state.clients[connection]
 	if not client then
 		return
@@ -398,7 +419,7 @@ local function queue_sync_file(state, connection, relPath)
 	end
 
 	if not validPath then
-		enqueue_frame(state, connection, "ERROR_REPORT", {
+		enqueueFrame(state, connection, "ERROR_REPORT", {
 			error = "invalid FILE_REQ path",
 			path = relPath,
 		})
@@ -418,7 +439,7 @@ local function queue_sync_file(state, connection, relPath)
 	table.insert(client.pendingFileRequests, relPath)
 end
 
-local function start_next_file_transfer(state, connection, client)
+local function startNextFileTransfer(state, connection, client)
 	if client.activeFileTransfer or #client.pendingFileRequests == 0 then
 		return false
 	end
@@ -434,7 +455,7 @@ local function start_next_file_transfer(state, connection, client)
 	end
 
 	if not fullPath then
-		enqueue_frame(state, connection, "ERROR_REPORT", {
+		enqueueFrame(state, connection, "ERROR_REPORT", {
 			error = "path not found in sync index",
 			path = relPath,
 		})
@@ -443,7 +464,7 @@ local function start_next_file_transfer(state, connection, client)
 
 	local file = io.open(fullPath, "rb")
 	if not file then
-		enqueue_frame(state, connection, "ERROR_REPORT", {
+		enqueueFrame(state, connection, "ERROR_REPORT", {
 			error = "file read failed",
 			path = relPath,
 		})
@@ -457,7 +478,7 @@ local function start_next_file_transfer(state, connection, client)
 	return true
 end
 
-local function pump_file_transfer(state, connection)
+local function pumpFileTransfer(state, connection)
 	local client = state.clients[connection]
 	if not client or not connection.isOpen then
 		return
@@ -473,7 +494,7 @@ local function pump_file_transfer(state, connection)
 			return
 		end
 
-		if not client.activeFileTransfer and not start_next_file_transfer(state, connection, client) then
+		if not client.activeFileTransfer and not startNextFileTransfer(state, connection, client) then
 			return
 		end
 
@@ -484,7 +505,7 @@ local function pump_file_transfer(state, connection)
 
 		local okRead, chunkOrErr = pcall(transfer.file.read, transfer.file, chunkSize)
 		if not okRead then
-			enqueue_frame(state, connection, "ERROR_REPORT", {
+			enqueueFrame(state, connection, "ERROR_REPORT", {
 				error = "file read failed",
 				path = transfer.path,
 			})
@@ -496,11 +517,11 @@ local function pump_file_transfer(state, connection)
 		end
 
 		if type(chunkOrErr) == "string" and #chunkOrErr > 0 then
-			local binaryFrame = encode_binary_frame(
+			local binaryFrame = encodeBinaryFrame(
 				"FILE_CHUNK",
 				string.pack(">I2", #transfer.path) .. transfer.path .. chunkOrErr
 			)
-			if not binaryFrame or not enqueue_bytes(state, connection, binaryFrame) then
+			if not binaryFrame or not enqueueBytes(state, connection, binaryFrame) then
 				return
 			end
 			sentChunks = sentChunks + 1
@@ -509,7 +530,7 @@ local function pump_file_transfer(state, connection)
 				transfer.file:close()
 			end)
 			client.activeFileTransfer = nil
-			if not enqueue_frame(state, connection, "FILE_END", {
+			if not enqueueFrame(state, connection, "FILE_END", {
 				path = transfer.path,
 			}) then
 				return
@@ -518,7 +539,7 @@ local function pump_file_transfer(state, connection)
 	end
 end
 
-local function handle_client_event(state, connection, message)
+local function handleClientEvent(state, connection, message)
 	local eventHash = message and message.eventHash
 	local msgId = message and message.msgId
 	local args = message and message.args or { n = 0 }
@@ -565,7 +586,7 @@ local function handle_client_event(state, connection, message)
 	}
 end
 
-local function queue_reliable_udp_event(state, connection, name, eventHash, argsBytes)
+local function queueReliableUdpEvent(state, connection, name, eventHash, argsBytes)
 	local client = state.clients[connection]
 	if not client or not connection.isOpen or not client.hello or not client.bound then
 		return false
@@ -636,7 +657,7 @@ local function queue_reliable_udp_event(state, connection, name, eventHash, args
 	return true
 end
 
-local function queue_reliable_udp_result(state, connection, name, msgId, eventHash, payloadBytes)
+local function queueReliableUdpResult(state, connection, name, msgId, eventHash, payloadBytes)
 	local client = state.clients[connection]
 	if not client or not connection.isOpen or not client.hello or not client.bound then
 		return false
@@ -646,7 +667,7 @@ local function queue_reliable_udp_result(state, connection, name, msgId, eventHa
 		return false
 	end
 
-	local normalizedMsgId = parse_msg_id(msgId)
+	local normalizedMsgId = parseMsgId(msgId)
 	if not normalizedMsgId then
 		return false
 	end
@@ -693,7 +714,7 @@ local function queue_reliable_udp_result(state, connection, name, msgId, eventHa
 	return true
 end
 
-local function log_legacy_tcp_event_frame(frameType)
+local function logLegacyTcpEventFrame(frameType)
 	if loggedLegacyTcpEventFrame then
 		return
 	end
@@ -702,12 +723,12 @@ local function log_legacy_tcp_event_frame(frameType)
 	log.warn("ignoring legacy TCP event-lane frame (%s)", tostring(frameType))
 end
 
-local function handle_reliable_event_ack_batch_payload(state, connection, msgIds)
+local function handleReliableEventAckBatchPayload(state, connection, msgIds)
 	local client = state.clients[connection]
 	if client and type(msgIds) == "table" then
-		ensure_event_tracking_tables(client)
+		ensureEventTrackingTables(client)
 		for i = 1, #msgIds do
-			local msgId = parse_msg_id(msgIds[i])
+			local msgId = parseMsgId(msgIds[i])
 			if msgId then
 				local pending = client.pendingEvents[msgId]
 				if pending then
@@ -724,12 +745,12 @@ local function handle_reliable_event_ack_batch_payload(state, connection, msgIds
 						client.earlyResults[msgId] = nil
 						local trackedName = client.awaitingResults[msgId] and client.awaitingResults[msgId].name or pending.name
 						client.awaitingResults[msgId] = nil
-						mark_event_recently_completed(state, client, msgId)
-						log_event_result(state, connection, trackedName, msgId, early)
+						markEventRecentlyCompleted(state, client, msgId)
+						logEventResult(state, connection, trackedName, msgId, early)
 					end
 				elseif client.pendingResults[msgId] then
 					client.pendingResults[msgId] = nil
-					mark_event_recently_completed(state, client, msgId)
+					markEventRecentlyCompleted(state, client, msgId)
 				elseif client.awaitingResults[msgId] then
 					-- Duplicate ACK while waiting for processing result; ignore.
 				elseif client.recentCompleted[msgId] then
@@ -742,14 +763,14 @@ local function handle_reliable_event_ack_batch_payload(state, connection, msgIds
 	end
 end
 
-local function handle_reliable_event_result_payload(state, connection, message)
+local function handleReliableEventResultPayload(state, connection, message)
 	local client = state.clients[connection]
 	if not client then
 		return
 	end
-	ensure_event_tracking_tables(client)
+	ensureEventTrackingTables(client)
 
-	local msgId = parse_msg_id(message and message.msgId)
+	local msgId = parseMsgId(message and message.msgId)
 	if not msgId then
 		log.warn("received EVENT_RESULT with invalid msgId from %s", shared.clientId(connection))
 		return
@@ -780,11 +801,11 @@ local function handle_reliable_event_result_payload(state, connection, message)
 
 	client.awaitingResults[msgId] = nil
 	client.earlyResults[msgId] = nil
-	mark_event_recently_completed(state, client, msgId)
-	log_event_result(state, connection, tracked.name, msgId, result)
+	markEventRecentlyCompleted(state, client, msgId)
+	logEventResult(state, connection, tracked.name, msgId, result)
 end
 
-local function queue_item_types_sync_frame(state, connection, payload)
+local function queueItemTypesSyncFrame(state, connection, payload)
 	local client = state.clients[connection]
 	if not client or not connection.isOpen or not client.hello then
 		return false
@@ -817,39 +838,39 @@ local function queue_item_types_sync_frame(state, connection, payload)
 	end
 	segments[#segments + 1] = payload.binRaw
 
-	local binaryFrame = encode_binary_frame("ITEM_TYPES_SYNC", table.concat(segments))
+	local binaryFrame = encodeBinaryFrame("ITEM_TYPES_SYNC", table.concat(segments))
 	if not binaryFrame then
 		return false
 	end
 
-	return enqueue_bytes(state, connection, binaryFrame)
+	return enqueueBytes(state, connection, binaryFrame)
 end
 
-local function queue_item_type_model_frame(state, connection, index, modelName)
+local function queueItemTypeModelFrame(state, connection, index, modelName)
 	local client = state.clients[connection]
 	if not client or not connection.isOpen or not client.hello then
 		return false
 	end
 
-	return enqueue_frame(state, connection, "ITEM_TYPE_MODEL", {
+	return enqueueFrame(state, connection, "ITEM_TYPE_MODEL", {
 		index = index,
 		model = modelName,
 	})
 end
 
-local function queue_item_type_icon_frame(state, connection, index, iconPath)
+local function queueItemTypeIconFrame(state, connection, index, iconPath)
 	local client = state.clients[connection]
 	if not client or not connection.isOpen or not client.hello then
 		return false
 	end
 
-	return enqueue_frame(state, connection, "ITEM_TYPE_ICON", {
+	return enqueueFrame(state, connection, "ITEM_TYPE_ICON", {
 		index = index,
 		icon = iconPath,
 	})
 end
 
-local function queue_item_type_texture_frame(state, connection, index, textureAssignment)
+local function queueItemTypeTextureFrame(state, connection, index, textureAssignment)
 	local client = state.clients[connection]
 	if not client or not connection.isOpen or not client.hello then
 		return false
@@ -871,10 +892,10 @@ local function queue_item_type_texture_frame(state, connection, index, textureAs
 		return false
 	end
 
-	return enqueue_frame(state, connection, "ITEM_TYPE_TEXTURE", payload)
+	return enqueueFrame(state, connection, "ITEM_TYPE_TEXTURE", payload)
 end
 
-local function queue_item_type_fire_sounds_frame(state, connection, index, soundAssignment)
+local function queueItemTypeFireSoundsFrame(state, connection, index, soundAssignment)
 	local client = state.clients[connection]
 	if not client or not connection.isOpen or not client.hello then
 		return false
@@ -896,43 +917,43 @@ local function queue_item_type_fire_sounds_frame(state, connection, index, sound
 		return false
 	end
 
-	return enqueue_frame(state, connection, "ITEM_TYPE_FIRE_SOUNDS", payload)
+	return enqueueFrame(state, connection, "ITEM_TYPE_FIRE_SOUNDS", payload)
 end
 
-local function send_initial_custom_item_sync(state, connection)
+local function sendInitialCustomItemSync(state, connection)
 	local buildSyncPayload = state.buildCustomItemTypesSyncPayload
 	if type(buildSyncPayload) == "function" then
 		local ok, payloadOrErr = pcall(buildSyncPayload, connection)
 		if ok then
 			local payload = payloadOrErr
 			if type(payload) == "table" and type(payload.itemTypes) == "table" and #payload.itemTypes > 0 then
-				queue_item_types_sync_frame(state, connection, payload)
+				queueItemTypesSyncFrame(state, connection, payload)
 
 				local modelAssignments = state.itemTypeModelAssignments
 				if type(modelAssignments) == "table" then
 					for idx, modelName in pairs(modelAssignments) do
-						queue_item_type_model_frame(state, connection, idx, modelName)
+						queueItemTypeModelFrame(state, connection, idx, modelName)
 					end
 				end
 
 				local iconAssignments = state.itemTypeIconAssignments
 				if type(iconAssignments) == "table" then
 					for idx, iconPath in pairs(iconAssignments) do
-						queue_item_type_icon_frame(state, connection, idx, iconPath)
+						queueItemTypeIconFrame(state, connection, idx, iconPath)
 					end
 				end
 
 				local textureAssignments = state.itemTypeTextureAssignments
 				if type(textureAssignments) == "table" then
 					for idx, textureAssignment in pairs(textureAssignments) do
-						queue_item_type_texture_frame(state, connection, idx, textureAssignment)
+						queueItemTypeTextureFrame(state, connection, idx, textureAssignment)
 					end
 				end
 
 				local fireSoundAssignments = state.itemTypeFireSoundAssignments
 				if type(fireSoundAssignments) == "table" then
 					for idx, soundAssignment in pairs(fireSoundAssignments) do
-						queue_item_type_fire_sounds_frame(state, connection, idx, soundAssignment)
+						queueItemTypeFireSoundsFrame(state, connection, idx, soundAssignment)
 					end
 				end
 			end
@@ -942,7 +963,7 @@ local function send_initial_custom_item_sync(state, connection)
 	end
 end
 
-local function handle_frame(state, connection, frame)
+local function handleFrame(state, connection, frame)
 	if type(frame) ~= "table" then
 		return
 	end
@@ -954,7 +975,7 @@ local function handle_frame(state, connection, frame)
 	end
 
 	if frameType == "SRC_PING" then
-		enqueue_frame(state, connection, "SRC_PONG", {
+		enqueueFrame(state, connection, "SRC_PONG", {
 			protocol = 1,
 		})
 		return
@@ -966,19 +987,19 @@ local function handle_frame(state, connection, frame)
 			return
 		end
 
-		reset_client_sync_state(client)
+		resetClientSyncState(client)
 		client.hello = true
 		client.helloPayload = payload
 		client.generation = state.syncGeneration
 
-		local player, bindErr = resolve_client_player_from_hello(state, connection, payload)
+		local player, bindErr = resolveClientPlayerFromHello(state, connection, payload)
 		if player then
-			apply_bound_player(state, connection, client, player)
+			applyBoundPlayer(state, connection, client, player)
 		elseif bindErr == "invalid_hello_payload" or bindErr == "ambiguous_bind_claims" then
 			log.warn("SRC bind rejected (%s): %s", shared.clientId(connection), tostring(bindErr))
-			clear_client_binding(client)
+			clearClientBinding(client)
 			client.hello = false
-			enqueue_frame(state, connection, "ERROR_REPORT", {
+			enqueueFrame(state, connection, "ERROR_REPORT", {
 				code = "SRC_BIND_REJECTED",
 				error = tostring(bindErr),
 			})
@@ -989,7 +1010,7 @@ local function handle_frame(state, connection, frame)
 			client.bound = false
 		end
 
-		enqueue_frame(state, connection, "HELLO_ACK", {
+		enqueueFrame(state, connection, "HELLO_ACK", {
 			protocol = 1,
 			port = server.port,
 			runtimeID = state.runtimeID,
@@ -998,7 +1019,7 @@ local function handle_frame(state, connection, frame)
 		})
 
 		if client.bound then
-			send_initial_custom_item_sync(state, connection)
+			sendInitialCustomItemSync(state, connection)
 		end
 		return
 	end
@@ -1006,7 +1027,7 @@ local function handle_frame(state, connection, frame)
 	if frameType == "INDEX_REQ" then
 		local client = state.clients[connection]
 		if not client or not client.hello then
-			enqueue_frame(state, connection, "ERROR_REPORT", {
+			enqueueFrame(state, connection, "ERROR_REPORT", {
 				code = "SRC_BIND_REQUIRED",
 				error = "HELLO required before INDEX_REQ",
 			})
@@ -1015,7 +1036,7 @@ local function handle_frame(state, connection, frame)
 
 		shared.discoverAssetFiles(state)
 		shared.discoverPersistentMode(state)
-		enqueue_frame(state, connection, "INDEX_RES", {
+		enqueueFrame(state, connection, "INDEX_RES", {
 			files = state.scripts,
 			assetFiles = state.assetFiles,
 			loadedLevel = state.loadedLevel,
@@ -1029,29 +1050,29 @@ local function handle_frame(state, connection, frame)
 	if frameType == "FILE_REQ" then
 		local client = state.clients[connection]
 		if not client or not client.hello then
-			enqueue_frame(state, connection, "ERROR_REPORT", {
+			enqueueFrame(state, connection, "ERROR_REPORT", {
 				code = "SRC_BIND_REQUIRED",
 				error = "HELLO required before FILE_REQ",
 			})
 			return
 		end
 
-		queue_sync_file(state, connection, payload.path)
+		queueSyncFile(state, connection, payload.path)
 		return
 	end
 
 	if frameType == "EVENT" then
-		log_legacy_tcp_event_frame(frameType)
+		logLegacyTcpEventFrame(frameType)
 		return
 	end
 
 	if frameType == "EVENT_ACK" then
-		log_legacy_tcp_event_frame(frameType)
+		logLegacyTcpEventFrame(frameType)
 		return
 	end
 
 	if frameType == "EVENT_RESULT" then
-		log_legacy_tcp_event_frame(frameType)
+		logLegacyTcpEventFrame(frameType)
 		return
 	end
 
@@ -1068,7 +1089,7 @@ local function handle_frame(state, connection, frame)
 	end
 end
 
-local function process_buffered_frames(state, connection, client, frameBudget)
+local function processBufferedFrames(state, connection, client, frameBudget)
 	local processed = 0
 	while processed < frameBudget do
 		local newlinePos = client.recvBuffer:find("\n", 1, true)
@@ -1082,9 +1103,9 @@ local function process_buffered_frames(state, connection, client, frameBudget)
 		if line ~= "" then
 			local frame = shared.safeJsonDecode(line)
 			if frame then
-				handle_frame(state, connection, frame)
+				handleFrame(state, connection, frame)
 			else
-				enqueue_frame(state, connection, "ERROR_REPORT", {
+				enqueueFrame(state, connection, "ERROR_REPORT", {
 					error = "invalid JSON frame",
 				})
 			end
@@ -1094,7 +1115,7 @@ local function process_buffered_frames(state, connection, client, frameBudget)
 	return processed
 end
 
-local function process_client_reads(state, connection)
+local function processClientReads(state, connection)
 	local client = state.clients[connection]
 	if not client or not connection.isOpen then
 		return
@@ -1104,7 +1125,7 @@ local function process_client_reads(state, connection)
 	local maxReadBytesPerTick = math.max(readSize, tonumber(state.config.maxReadBytesPerTick) or 262144)
 	local maxFramesPerTick = 256
 	local readBytesThisTick = 0
-	local framesThisTick = process_buffered_frames(state, connection, client, maxFramesPerTick)
+	local framesThisTick = processBufferedFrames(state, connection, client, maxFramesPerTick)
 
 	while connection.isOpen and readBytesThisTick < maxReadBytesPerTick and framesThisTick < maxFramesPerTick do
 		local ok, dataOrErr = pcall(connection.receive, connection, readSize)
@@ -1125,7 +1146,7 @@ local function process_client_reads(state, connection)
 		readBytesThisTick = readBytesThisTick + #data
 
 		client.recvBuffer = client.recvBuffer .. data
-		framesThisTick = framesThisTick + process_buffered_frames(
+		framesThisTick = framesThisTick + processBufferedFrames(
 			state,
 			connection,
 			client,
@@ -1134,13 +1155,13 @@ local function process_client_reads(state, connection)
 	end
 end
 
-local function process_pending_retries(state, connection)
+local function processPendingRetries(state, connection)
 	local client = state.clients[connection]
 	if not client then
 		return
 	end
-	ensure_event_tracking_tables(client)
-	cleanup_recent_completions(state, client)
+	ensureEventTrackingTables(client)
+	cleanupRecentCompletions(state, client)
 
 	local maxAttempts = state.config.eventRetryMaxAttempts
 	local baseTicks = state.config.eventRetryBaseTicks
@@ -1157,7 +1178,7 @@ local function process_pending_retries(state, connection)
 				)
 				client.pendingEvents[msgID] = nil
 				client.earlyResults[msgID] = nil
-				mark_event_recently_completed(state, client, msgID)
+				markEventRecentlyCompleted(state, client, msgID)
 			else
 				pending.attempts = pending.attempts + 1
 				pending.nextRetryTick = state.tick + baseTicks * (2 ^ (pending.attempts - 1))
@@ -1178,7 +1199,7 @@ local function process_pending_retries(state, connection)
 					pending.attempts
 				)
 				client.pendingResults[msgID] = nil
-				mark_event_recently_completed(state, client, msgID)
+				markEventRecentlyCompleted(state, client, msgID)
 			else
 				pending.attempts = pending.attempts + 1
 				pending.nextRetryTick = state.tick + baseTicks * (2 ^ (pending.attempts - 1))
@@ -1198,12 +1219,12 @@ local function process_pending_retries(state, connection)
 			)
 			client.awaitingResults[msgID] = nil
 			client.earlyResults[msgID] = nil
-			mark_event_recently_completed(state, client, msgID)
+			markEventRecentlyCompleted(state, client, msgID)
 		end
 	end
 end
 
-local function accept_connections(state)
+local function acceptConnections(state)
 	if not state.tcpServer or not state.tcpServer.isOpen then
 		return
 	end
@@ -1243,38 +1264,38 @@ local function accept_connections(state)
 	end
 end
 
-local function process_clients(state)
+local function processClients(state)
 	for connection, client in pairs(state.clients) do
 		if connection.isOpen and client then
 			if client.hello and client.bound then
-				validate_bound_player(connection, client)
+				validateBoundPlayer(connection, client)
 			elseif client.hello and not client.bound then
-				local player, _ = resolve_client_player_from_hello(state, connection, client.helloPayload)
+				local player, _ = resolveClientPlayerFromHello(state, connection, client.helloPayload)
 				if player then
-					if apply_bound_player(state, connection, client, player) then
-						send_initial_custom_item_sync(state, connection)
+					if applyBoundPlayer(state, connection, client, player) then
+						sendInitialCustomItemSync(state, connection)
 					end
 				end
 			end
 
-			suppress_player_timeout_while_syncing(client)
+			suppressPlayerTimeoutWhileSyncing(client)
 		end
 
 		if connection.isOpen then
-			process_client_reads(state, connection)
-			process_pending_retries(state, connection)
-			pump_file_transfer(state, connection)
-			flush_send_queue(state, connection)
+			processClientReads(state, connection)
+			processPendingRetries(state, connection)
+			pumpFileTransfer(state, connection)
+			flushSendQueue(state, connection)
 		end
 
 		if not connection.isOpen then
 			log.info("TCP client disconnected: %s", shared.clientId(connection))
-			clear_client_state(state, connection)
+			clearClientState(state, connection)
 		end
 	end
 end
 
-local function close_all(state)
+local function closeAll(state)
 	for connection, _ in pairs(state.clients) do
 		if connection.isOpen then
 			pcall(connection.close, connection)
@@ -1289,7 +1310,7 @@ local function close_all(state)
 	state.boundPort = nil
 end
 
-local function ensure_tcp_server(state)
+local function ensureTcpServer(state)
 	if state.tcpBindInProgress then
 		return
 	end
@@ -1304,7 +1325,7 @@ local function ensure_tcp_server(state)
 	end
 
 	if state.tcpServer and state.tcpServer.isOpen then
-		close_all(state)
+		closeAll(state)
 	end
 
 	state.tcpBindInProgress = true
@@ -1383,7 +1404,7 @@ function M.emitClientEvent(state, player, name, eventHash, argsBytes)
 		for connection, client in pairs(state.clients) do
 			local ply = connection.player
 			if connection.isOpen and client.hello and client.bound and (not ply or not ply.isBot) then
-				if queue_reliable_udp_event(state, connection, name, eventHash, args) then
+				if queueReliableUdpEvent(state, connection, name, eventHash, args) then
 					sent = sent + 1
 				end
 			end
@@ -1399,12 +1420,12 @@ function M.emitClientEvent(state, player, name, eventHash, argsBytes)
 		return false
 	end
 
-	local connection = get_player_connection(state, player)
+	local connection = getPlayerConnection(state, player)
 	if not connection then
 		return false
 	end
 
-	return queue_reliable_udp_event(state, connection, name, eventHash, args)
+	return queueReliableUdpEvent(state, connection, name, eventHash, args)
 end
 
 function M.binary(bytes)
@@ -1421,7 +1442,7 @@ function M.syncClientItemTypes(state, player, payload)
 		for connection, client in pairs(state.clients) do
 			local ply = connection.player
 			if connection.isOpen and client.hello and client.bound and (not ply or not ply.isBot) then
-				if queue_item_types_sync_frame(state, connection, payload) then
+				if queueItemTypesSyncFrame(state, connection, payload) then
 					sent = sent + 1
 				end
 			end
@@ -1437,12 +1458,12 @@ function M.syncClientItemTypes(state, player, payload)
 		return false
 	end
 
-	local connection = get_player_connection(state, player)
+	local connection = getPlayerConnection(state, player)
 	if not connection then
 		return false
 	end
 
-	return queue_item_types_sync_frame(state, connection, payload)
+	return queueItemTypesSyncFrame(state, connection, payload)
 end
 
 function M.syncClientItemTypesToConnection(state, connection, payload)
@@ -1450,11 +1471,11 @@ function M.syncClientItemTypesToConnection(state, connection, payload)
 		return false
 	end
 
-	return queue_item_types_sync_frame(state, connection, payload)
+	return queueItemTypesSyncFrame(state, connection, payload)
 end
 
 function M.sendItemTypeModelToConnection(state, connection, index, modelName)
-	return queue_item_type_model_frame(state, connection, index, modelName)
+	return queueItemTypeModelFrame(state, connection, index, modelName)
 end
 
 function M.sendItemTypeIcon(state, player, index, iconPath)
@@ -1463,7 +1484,7 @@ function M.sendItemTypeIcon(state, player, index, iconPath)
 		for connection, client in pairs(state.clients) do
 			local ply = connection.player
 			if connection.isOpen and client.hello and client.bound and (not ply or not ply.isBot) then
-				if queue_item_type_icon_frame(state, connection, index, iconPath) then
+				if queueItemTypeIconFrame(state, connection, index, iconPath) then
 					sent = sent + 1
 				end
 			end
@@ -1479,16 +1500,16 @@ function M.sendItemTypeIcon(state, player, index, iconPath)
 		return false
 	end
 
-	local connection = get_player_connection(state, player)
+	local connection = getPlayerConnection(state, player)
 	if not connection then
 		return false
 	end
 
-	return queue_item_type_icon_frame(state, connection, index, iconPath)
+	return queueItemTypeIconFrame(state, connection, index, iconPath)
 end
 
 function M.sendItemTypeIconToConnection(state, connection, index, iconPath)
-	return queue_item_type_icon_frame(state, connection, index, iconPath)
+	return queueItemTypeIconFrame(state, connection, index, iconPath)
 end
 
 function M.sendItemTypeTexture(state, player, index, textureAssignment)
@@ -1497,7 +1518,7 @@ function M.sendItemTypeTexture(state, player, index, textureAssignment)
 		for connection, client in pairs(state.clients) do
 			local ply = connection.player
 			if connection.isOpen and client.hello and client.bound and (not ply or not ply.isBot) then
-				if queue_item_type_texture_frame(state, connection, index, textureAssignment) then
+				if queueItemTypeTextureFrame(state, connection, index, textureAssignment) then
 					sent = sent + 1
 				end
 			end
@@ -1513,16 +1534,16 @@ function M.sendItemTypeTexture(state, player, index, textureAssignment)
 		return false
 	end
 
-	local connection = get_player_connection(state, player)
+	local connection = getPlayerConnection(state, player)
 	if not connection then
 		return false
 	end
 
-	return queue_item_type_texture_frame(state, connection, index, textureAssignment)
+	return queueItemTypeTextureFrame(state, connection, index, textureAssignment)
 end
 
 function M.sendItemTypeTextureToConnection(state, connection, index, textureAssignment)
-	return queue_item_type_texture_frame(state, connection, index, textureAssignment)
+	return queueItemTypeTextureFrame(state, connection, index, textureAssignment)
 end
 
 function M.sendItemTypeFireSounds(state, player, index, soundAssignment)
@@ -1531,7 +1552,7 @@ function M.sendItemTypeFireSounds(state, player, index, soundAssignment)
 		for connection, client in pairs(state.clients) do
 			local ply = connection.player
 			if connection.isOpen and client.hello and client.bound and (not ply or not ply.isBot) then
-				if queue_item_type_fire_sounds_frame(state, connection, index, soundAssignment) then
+				if queueItemTypeFireSoundsFrame(state, connection, index, soundAssignment) then
 					sent = sent + 1
 				end
 			end
@@ -1547,16 +1568,16 @@ function M.sendItemTypeFireSounds(state, player, index, soundAssignment)
 		return false
 	end
 
-	local connection = get_player_connection(state, player)
+	local connection = getPlayerConnection(state, player)
 	if not connection then
 		return false
 	end
 
-	return queue_item_type_fire_sounds_frame(state, connection, index, soundAssignment)
+	return queueItemTypeFireSoundsFrame(state, connection, index, soundAssignment)
 end
 
 function M.sendItemTypeFireSoundsToConnection(state, connection, index, soundAssignment)
-	return queue_item_type_fire_sounds_frame(state, connection, index, soundAssignment)
+	return queueItemTypeFireSoundsFrame(state, connection, index, soundAssignment)
 end
 
 
@@ -1566,7 +1587,7 @@ function M.sendItemTypeModel(state, player, index, modelName)
 		for connection, client in pairs(state.clients) do
 			local ply = connection.player
 			if connection.isOpen and client.hello and client.bound and (not ply or not ply.isBot) then
-				if queue_item_type_model_frame(state, connection, index, modelName) then
+				if queueItemTypeModelFrame(state, connection, index, modelName) then
 					sent = sent + 1
 				end
 			end
@@ -1582,21 +1603,21 @@ function M.sendItemTypeModel(state, player, index, modelName)
 		return false
 	end
 
-	local connection = get_player_connection(state, player)
+	local connection = getPlayerConnection(state, player)
 	if not connection then
 		return false
 	end
 
-	return queue_item_type_model_frame(state, connection, index, modelName)
+	return queueItemTypeModelFrame(state, connection, index, modelName)
 end
 
 function M.refresh(state)
-	local generation = next_sync_generation(state)
+	local generation = nextSyncGeneration(state)
 	for connection, client in pairs(state.clients) do
 		if connection.isOpen and client.hello then
-			reset_client_sync_state(client)
+			resetClientSyncState(client)
 			client.generation = generation
-			enqueue_frame(state, connection, "REFRESH_NOTICE", {
+			enqueueFrame(state, connection, "REFRESH_NOTICE", {
 				runtimeID = state.runtimeID,
 				syncGeneration = generation,
 			})
@@ -1604,14 +1625,14 @@ function M.refresh(state)
 	end
 end
 
-function M.ensure_tcp_server(state)
-	ensure_tcp_server(state)
+function M.ensureTcpServer(state)
+	ensureTcpServer(state)
 end
 
 function M.logicStep(state)
-	ensure_tcp_server(state)
-	accept_connections(state)
-	process_clients(state)
+	ensureTcpServer(state)
+	acceptConnections(state)
+	processClients(state)
 end
 
 function M.onSendPacket(state, address, port)
@@ -1640,7 +1661,7 @@ function M.onPostPacketReceive(state)
 		if message.kind == 1 then
 			if client.hello and client.bound then
 				udpEvents.queueAck(client, message.msgId)
-				local result = handle_client_event(state, connection, message)
+				local result = handleClientEvent(state, connection, message)
 				local resultPayload, encodeErr = eventCodec.encodeArgs(
 					result.status,
 					result.handled,
@@ -1648,7 +1669,7 @@ function M.onPostPacketReceive(state)
 					result.detail or ""
 				)
 				if resultPayload then
-					if not queue_reliable_udp_result(
+					if not queueReliableUdpResult(
 						state,
 						connection,
 						result.eventName or udpEvents.formatEventHash(message.eventHash),
@@ -1672,19 +1693,19 @@ function M.onPostPacketReceive(state)
 				end
 			end
 		elseif message.kind == 2 then
-			handle_reliable_event_ack_batch_payload(state, connection, message.msgIds)
+			handleReliableEventAckBatchPayload(state, connection, message.msgIds)
 		elseif message.kind == 3 then
-			handle_reliable_event_result_payload(state, connection, message)
+			handleReliableEventResultPayload(state, connection, message)
 		end
 	end
 end
 
 function M.shutdown(state)
-	close_all(state)
+	closeAll(state)
 end
 
-function M.get_player_connection(player)
-	return get_player_connection(state, player)
+function M.getPlayerConnection(state, player)
+	return getPlayerConnection(state, player)
 end
 
 function M.getConnectionPlayer(state, connection)

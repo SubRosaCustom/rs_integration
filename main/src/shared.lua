@@ -21,7 +21,7 @@ M.DEFAULT_CONFIG = {
 	eventDebugLogSuccess = false,
 }
 
-local function copy_defaults()
+local function copyDefaults()
 	local out = {}
 	for key, value in pairs(M.DEFAULT_CONFIG) do
 		out[key] = value
@@ -29,7 +29,7 @@ local function copy_defaults()
 	return out
 end
 
-local function normalize_number(value, fallback, minValue)
+local function normalizeNumber(value, fallback, minValue)
 	local num = tonumber(value)
 	if not num then
 		return fallback
@@ -43,7 +43,7 @@ local function normalize_number(value, fallback, minValue)
 end
 
 function M.resolveConfig(raw)
-	local cfg = copy_defaults()
+	local cfg = copyDefaults()
 	if type(raw) ~= "table" then
 		return cfg
 	end
@@ -60,18 +60,18 @@ function M.resolveConfig(raw)
 		cfg.clientRoot = raw.clientRoot
 	end
 
-	cfg.readSize = normalize_number(raw.readSize, cfg.readSize, 1024)
-	cfg.fileChunkSize = normalize_number(raw.fileChunkSize, cfg.fileChunkSize, 256)
-	cfg.maxReadBytesPerTick = normalize_number(raw.maxReadBytesPerTick, cfg.maxReadBytesPerTick, 4096)
-	cfg.maxSendBytesPerTick = normalize_number(raw.maxSendBytesPerTick, cfg.maxSendBytesPerTick, 4096)
-	cfg.maxFileChunksPerTick = normalize_number(raw.maxFileChunksPerTick, cfg.maxFileChunksPerTick, 1)
-	cfg.maxQueuedSendFrames = normalize_number(raw.maxQueuedSendFrames, cfg.maxQueuedSendFrames, 8)
+	cfg.readSize = normalizeNumber(raw.readSize, cfg.readSize, 1024)
+	cfg.fileChunkSize = normalizeNumber(raw.fileChunkSize, cfg.fileChunkSize, 256)
+	cfg.maxReadBytesPerTick = normalizeNumber(raw.maxReadBytesPerTick, cfg.maxReadBytesPerTick, 4096)
+	cfg.maxSendBytesPerTick = normalizeNumber(raw.maxSendBytesPerTick, cfg.maxSendBytesPerTick, 4096)
+	cfg.maxFileChunksPerTick = normalizeNumber(raw.maxFileChunksPerTick, cfg.maxFileChunksPerTick, 1)
+	cfg.maxQueuedSendFrames = normalizeNumber(raw.maxQueuedSendFrames, cfg.maxQueuedSendFrames, 8)
 	cfg.autoRefreshEnabled = raw.autoRefreshEnabled == true
-	cfg.autoRefreshDebounceTicks = normalize_number(raw.autoRefreshDebounceTicks, cfg.autoRefreshDebounceTicks, 1)
-	cfg.eventRetryBaseTicks = normalize_number(raw.eventRetryBaseTicks, cfg.eventRetryBaseTicks, 1)
-	cfg.eventRetryMaxAttempts = normalize_number(raw.eventRetryMaxAttempts, cfg.eventRetryMaxAttempts, 1)
-	cfg.maxEventBytes = normalize_number(raw.maxEventBytes, cfg.maxEventBytes, 1024)
-	cfg.eventProcessTimeoutTicks = normalize_number(raw.eventProcessTimeoutTicks, cfg.eventProcessTimeoutTicks, 1)
+	cfg.autoRefreshDebounceTicks = normalizeNumber(raw.autoRefreshDebounceTicks, cfg.autoRefreshDebounceTicks, 1)
+	cfg.eventRetryBaseTicks = normalizeNumber(raw.eventRetryBaseTicks, cfg.eventRetryBaseTicks, 1)
+	cfg.eventRetryMaxAttempts = normalizeNumber(raw.eventRetryMaxAttempts, cfg.eventRetryMaxAttempts, 1)
+	cfg.maxEventBytes = normalizeNumber(raw.maxEventBytes, cfg.maxEventBytes, 1024)
+	cfg.eventProcessTimeoutTicks = normalizeNumber(raw.eventProcessTimeoutTicks, cfg.eventProcessTimeoutTicks, 1)
 	if type(raw.eventDebugLogSuccess) == "boolean" then
 		cfg.eventDebugLogSuccess = raw.eventDebugLogSuccess
 	end
@@ -88,7 +88,7 @@ function M.getState()
 	end
 
 	local created = {
-		config = copy_defaults(),
+		config = copyDefaults(),
 		enabled = true,
 		runtimeActive = false,
 		hooksRegistered = false,
@@ -172,7 +172,7 @@ function M.readFile(path)
 	return data
 end
 
-local function file_extension(name)
+local function fileExtension(name)
 	if type(name) ~= "string" then
 		return ""
 	end
@@ -185,7 +185,7 @@ local function file_extension(name)
 	return name:sub(dot):lower()
 end
 
-local function to_lower(value)
+local function toLower(value)
 	if type(value) ~= "string" then
 		return ""
 	end
@@ -287,12 +287,12 @@ local PROTECTED_TEXTURE_FILES = {
 	["texture/title.png"] = true,
 }
 
-local function is_default_game_map_name(levelName)
-	local normalized = to_lower(levelName or "")
+local function isDefaultGameMapName(levelName)
+	local normalized = toLower(levelName or "")
 	return normalized == "round" or normalized == "test2"
 end
 
-local function should_skip_bundled_model_cmo(syncPath)
+local function shouldSkipBundledModelCmo(syncPath)
 	if type(syncPath) ~= "string" then
 		return false
 	end
@@ -311,29 +311,29 @@ local function should_skip_bundled_model_cmo(syncPath)
 		return false
 	end
 
-	fileName = to_lower(fileName)
-	if file_extension(fileName) ~= ".cmo" then
+	fileName = toLower(fileName)
+	if fileExtension(fileName) ~= ".cmo" then
 		return false
 	end
 
 	return DEFAULT_GAME_MODEL_CMO_FILES[fileName] == true
 end
 
-local function is_protected_texture_file(syncPath)
+local function isProtectedTextureFile(syncPath)
 	if type(syncPath) ~= "string" then
 		return false
 	end
 
-	return PROTECTED_TEXTURE_FILES[to_lower(syncPath)] == true
+	return PROTECTED_TEXTURE_FILES[toLower(syncPath)] == true
 end
 
-local function has_safe_extension(path)
-	local ext = file_extension(path)
+local function hasSafeExtension(path)
+	local ext = fileExtension(path)
 	return ext == ".lua" or ext == ".yml" or ext == ".yaml" or ext == ".json"
 end
 
-local function has_safe_asset_extension(path)
-	local ext = file_extension(path)
+local function hasSafeAssetExtension(path)
+	local ext = fileExtension(path)
 	return ext == ".csx" or ext == ".sbc" or ext == ".sbl" or ext == ".cmo" or ext == ".png" or ext == ".wav"
 end
 
@@ -346,7 +346,7 @@ function M.isSafeSyncPath(path)
 		return false
 	end
 
-	if not has_safe_extension(path) then
+	if not hasSafeExtension(path) then
 		return false
 	end
 
@@ -378,7 +378,7 @@ function M.isSafeAssetSyncPath(path)
 		return false
 	end
 
-	if not has_safe_asset_extension(path) then
+	if not hasSafeAssetExtension(path) then
 		return false
 	end
 
@@ -394,8 +394,8 @@ function M.isSafeAssetSyncPath(path)
 		return false
 	end
 
-	local lowerPath = to_lower(path)
-	if is_protected_texture_file(lowerPath) then
+	local lowerPath = toLower(path)
+	if isProtectedTextureFile(lowerPath) then
 		return false
 	end
 
@@ -410,7 +410,7 @@ function M.eventPayloadSize(payload)
 	return #encoded
 end
 
-local function collect_scripts_recursive(state, root, relativePath)
+local function collectScriptsRecursive(state, root, relativePath)
 	relativePath = relativePath or ""
 
 	local current = root
@@ -433,7 +433,7 @@ local function collect_scripts_recursive(state, root, relativePath)
 			if relativePath ~= "" then
 				child = relativePath .. "/" .. entry.name
 			end
-			collect_scripts_recursive(state, root, child)
+			collectScriptsRecursive(state, root, child)
 		else
 			local relPath = entry.name
 			if relativePath ~= "" then
@@ -469,9 +469,9 @@ function M.discoverScripts(state)
 	state.scripts = {}
 	state.scriptsByPath = {}
 
-	collect_scripts_recursive(state, root, "")
+	collectScriptsRecursive(state, root, "")
 	if #state.scripts == 0 then
-		collect_scripts_recursive(state, state.config.clientRoot, "")
+		collectScriptsRecursive(state, state.config.clientRoot, "")
 	end
 
 	table.sort(state.scripts, function(a, b)
@@ -544,7 +544,7 @@ function M.discoverPersistentMode(state)
 	return state.persistentMode
 end
 
-local function collect_asset_files_recursive(state, root, syncRootPrefix, relativePath)
+local function collectAssetFilesRecursive(state, root, syncRootPrefix, relativePath)
 	relativePath = relativePath or ""
 
 	local current = root
@@ -563,7 +563,7 @@ local function collect_asset_files_recursive(state, root, syncRootPrefix, relati
 			if relativePath ~= "" then
 				child = relativePath .. "/" .. entry.name
 			end
-			collect_asset_files_recursive(state, root, syncRootPrefix, child)
+			collectAssetFilesRecursive(state, root, syncRootPrefix, child)
 		else
 			local relPath = entry.name
 			if relativePath ~= "" then
@@ -576,7 +576,7 @@ local function collect_asset_files_recursive(state, root, syncRootPrefix, relati
 				syncPath = M.joinPath(syncRootPrefix, relPath)
 			end
 			if M.isSafeAssetSyncPath(syncPath) then
-				local shouldSkip = should_skip_bundled_model_cmo(syncPath)
+				local shouldSkip = shouldSkipBundledModelCmo(syncPath)
 				if not shouldSkip then
 					local bytes = M.readFile(fullPath)
 					if bytes then
@@ -605,15 +605,15 @@ function M.discoverAssetFiles(state)
 	local normalizedLevel = M.normalizeLoadedLevel(server and server.loadedLevel or nil)
 	state.loadedLevel = normalizedLevel
 
-	if normalizedLevel ~= "" and not is_default_game_map_name(normalizedLevel) then
+	if normalizedLevel ~= "" and not isDefaultGameMapName(normalizedLevel) then
 		local levelSyncRoot = "data/" .. normalizedLevel
-		collect_asset_files_recursive(state, levelSyncRoot, levelSyncRoot, "")
+		collectAssetFilesRecursive(state, levelSyncRoot, levelSyncRoot, "")
 	end
 
 	pcall(os.createDirectory, state.config.clientRoot)
 	local root = M.assetsRoot(state.config)
 	pcall(os.createDirectory, root)
-	collect_asset_files_recursive(state, root, "", "")
+	collectAssetFilesRecursive(state, root, "", "")
 
 	table.sort(state.assetFiles, function(a, b)
 		return a.path < b.path

@@ -10,7 +10,7 @@ function M.clear(state)
 	state.pendingRefreshTick = nil
 end
 
-local function watch_directory_recursive(state, root, rel)
+local function watchDirectoryRecursive(state, root, rel)
 	rel = rel or ""
 
 	local dir = root
@@ -34,7 +34,7 @@ local function watch_directory_recursive(state, root, rel)
 			if rel ~= "" then
 				child = rel .. "/" .. entry.name
 			end
-			watch_directory_recursive(state, root, child)
+			watchDirectoryRecursive(state, root, child)
 		end
 	end
 end
@@ -58,7 +58,7 @@ function M.ensure(state)
 	state.watchedDirectories = {}
 	state.watchedRoot = root
 	pcall(os.createDirectory, root)
-	watch_directory_recursive(state, root, "")
+	watchDirectoryRecursive(state, root, "")
 	log.info("auto-refresh watcher enabled")
 end
 
