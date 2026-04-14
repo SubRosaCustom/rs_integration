@@ -203,6 +203,7 @@ local function closeClientTransfer(client)
 	end
 	if client then
 		client.activeFileTransfer = nil
+		client.activeBundleTransfer = nil
 	end
 end
 
@@ -213,6 +214,7 @@ local function resetClientSyncState(client)
 
 	closeClientTransfer(client)
 	client.pendingFileRequests = {}
+	client.pendingBundleRequests = {}
 	client.pendingEvents = {}
 	client.pendingResults = {}
 	client.awaitingResults = {}
@@ -301,6 +303,14 @@ local function isClientSyncing(client)
 		return true
 	end
 
+	if client.activeBundleTransfer then
+		return true
+	end
+
+	if type(client.pendingBundleRequests) == "table" and #client.pendingBundleRequests > 0 then
+		return true
+	end
+
 	return type(client.pendingFileRequests) == "table" and #client.pendingFileRequests > 0
 end
 
@@ -360,6 +370,27 @@ local function enqueueFrame(state, connection, frameType, payload)
 	}
 
 	return enqueueBytes(state, connection, json.encode(body) .. "\n")
+end
+
+local function bundleMetadataList(state)
+	local bundles = {}
+	if type(state.syncBundles) ~= "table" then
+		return bundles
+	end
+
+	for i = 1, #state.syncBundles do
+		local bundle = state.syncBundles[i]
+		bundles[#bundles + 1] = {
+			id = bundle.id,
+			kind = bundle.kind,
+			size = bundle.size,
+			archiveSha256 = bundle.archiveSha256,
+			contentSha256 = bundle.contentSha256,
+			files = bundle.files,
+		}
+	end
+
+	return bundles
 end
 
 local function flushSendQueue(state, connection)
@@ -439,6 +470,34 @@ local function queueSyncFile(state, connection, relPath)
 	table.insert(client.pendingFileRequests, relPath)
 end
 
+local function queueSyncBundle(state, connection, bundleID)
+	local client = state.clients[connection]
+	if not client or type(bundleID) ~= "string" or bundleID == "" then
+		return
+	end
+
+	local bundle = state.syncBundlesById and state.syncBundlesById[bundleID] or nil
+	if not bundle or type(bundle.archive) ~= "string" or bundle.archive == "" then
+		enqueueFrame(state, connection, "ERROR_REPORT", {
+			error = "invalid BUNDLE_REQ id",
+			id = bundleID,
+		})
+		return
+	end
+
+	if client.activeBundleTransfer and client.activeBundleTransfer.id == bundleID then
+		return
+	end
+
+	for _, queuedID in ipairs(client.pendingBundleRequests) do
+		if queuedID == bundleID then
+			return
+		end
+	end
+
+	table.insert(client.pendingBundleRequests, bundleID)
+end
+
 local function startNextFileTransfer(state, connection, client)
 	if client.activeFileTransfer or #client.pendingFileRequests == 0 then
 		return false
@@ -474,6 +533,29 @@ local function startNextFileTransfer(state, connection, client)
 	client.activeFileTransfer = {
 		path = relPath,
 		file = file,
+	}
+	return true
+end
+
+local function startNextBundleTransfer(state, connection, client)
+	if client.activeBundleTransfer or #client.pendingBundleRequests == 0 then
+		return false
+	end
+
+	local bundleID = table.remove(client.pendingBundleRequests, 1)
+	local bundle = state.syncBundlesById and state.syncBundlesById[bundleID] or nil
+	if not bundle or type(bundle.archive) ~= "string" then
+		enqueueFrame(state, connection, "ERROR_REPORT", {
+			error = "bundle not found in sync index",
+			id = bundleID,
+		})
+		return false
+	end
+
+	client.activeBundleTransfer = {
+		id = bundleID,
+		data = bundle.archive,
+		offset = 1,
 	}
 	return true
 end
@@ -532,6 +614,53 @@ local function pumpFileTransfer(state, connection)
 			client.activeFileTransfer = nil
 			if not enqueueFrame(state, connection, "FILE_END", {
 				path = transfer.path,
+			}) then
+				return
+			end
+		end
+	end
+end
+
+local function pumpBundleTransfer(state, connection)
+	local client = state.clients[connection]
+	if not client or not connection.isOpen then
+		return
+	end
+
+	local chunkSize = math.max(256, tonumber(state.config.fileChunkSize) or 12000)
+	local chunkBudget = math.max(1, tonumber(state.config.maxFileChunksPerTick) or 8)
+	local maxQueuedSendFrames = math.max(8, tonumber(state.config.maxQueuedSendFrames) or 256)
+
+	local sentChunks = 0
+	while sentChunks < chunkBudget do
+		if #client.sendQueue >= maxQueuedSendFrames then
+			return
+		end
+
+		if not client.activeBundleTransfer and not startNextBundleTransfer(state, connection, client) then
+			return
+		end
+
+		local transfer = client.activeBundleTransfer
+		if not transfer then
+			return
+		end
+
+		local chunk = transfer.data:sub(transfer.offset, transfer.offset + chunkSize - 1)
+		if chunk ~= "" then
+			local binaryFrame = encodeBinaryFrame(
+				"BUNDLE_CHUNK",
+				string.pack(">I2", #transfer.id) .. transfer.id .. chunk
+			)
+			if not binaryFrame or not enqueueBytes(state, connection, binaryFrame) then
+				return
+			end
+			transfer.offset = transfer.offset + #chunk
+			sentChunks = sentChunks + 1
+		else
+			client.activeBundleTransfer = nil
+			if not enqueueFrame(state, connection, "BUNDLE_END", {
+				id = transfer.id,
 			}) then
 				return
 			end
@@ -976,7 +1105,7 @@ local function handleFrame(state, connection, frame)
 
 	if frameType == "SRC_PING" then
 		enqueueFrame(state, connection, "SRC_PONG", {
-			protocol = 1,
+			protocol = 2,
 		})
 		return
 	end
@@ -1011,7 +1140,7 @@ local function handleFrame(state, connection, frame)
 		end
 
 		enqueueFrame(state, connection, "HELLO_ACK", {
-			protocol = 1,
+			protocol = 2,
 			port = server.port,
 			runtimeID = state.runtimeID,
 			syncGeneration = state.syncGeneration,
@@ -1024,9 +1153,9 @@ local function handleFrame(state, connection, frame)
 		return
 	end
 
-	if frameType == "INDEX_REQ" then
-		local client = state.clients[connection]
-		if not client or not client.hello then
+		if frameType == "INDEX_REQ" then
+			local client = state.clients[connection]
+			if not client or not client.hello then
 			enqueueFrame(state, connection, "ERROR_REPORT", {
 				code = "SRC_BIND_REQUIRED",
 				error = "HELLO required before INDEX_REQ",
@@ -1034,20 +1163,20 @@ local function handleFrame(state, connection, frame)
 			return
 		end
 
-		shared.discoverAssetFiles(state)
-		shared.discoverPersistentMode(state)
-		enqueueFrame(state, connection, "INDEX_RES", {
-			files = state.scripts,
-			assetFiles = state.assetFiles,
-			loadedLevel = state.loadedLevel,
-			persistentMode = state.persistentMode,
-			runtimeID = state.runtimeID,
-			syncGeneration = state.syncGeneration,
-		})
+			if #state.syncBundles == 0 and #state.scripts == 0 and #state.assetFiles == 0 then
+				shared.discoverSyncFiles(state)
+			end
+			enqueueFrame(state, connection, "INDEX_RES", {
+				bundles = bundleMetadataList(state),
+				loadedLevel = state.loadedLevel,
+				persistentMode = state.persistentMode,
+				runtimeID = state.runtimeID,
+				syncGeneration = state.syncGeneration,
+			})
 		return
 	end
 
-	if frameType == "FILE_REQ" then
+		if frameType == "FILE_REQ" then
 		local client = state.clients[connection]
 		if not client or not client.hello then
 			enqueueFrame(state, connection, "ERROR_REPORT", {
@@ -1057,9 +1186,23 @@ local function handleFrame(state, connection, frame)
 			return
 		end
 
-		queueSyncFile(state, connection, payload.path)
-		return
-	end
+			queueSyncFile(state, connection, payload.path)
+			return
+		end
+
+		if frameType == "BUNDLE_REQ" then
+			local client = state.clients[connection]
+			if not client or not client.hello then
+				enqueueFrame(state, connection, "ERROR_REPORT", {
+					code = "SRC_BIND_REQUIRED",
+					error = "HELLO required before BUNDLE_REQ",
+				})
+				return
+			end
+
+			queueSyncBundle(state, connection, payload.id)
+			return
+		end
 
 	if frameType == "EVENT" then
 		logLegacyTcpEventFrame(frameType)
@@ -1240,13 +1383,15 @@ local function acceptConnections(state)
 			break
 		end
 
-		state.clients[connOrErr] = {
-			recvBuffer = "",
-			sendQueue = {},
-			sendOffset = 1,
-			pendingFileRequests = {},
-			activeFileTransfer = nil,
-			hello = false,
+			state.clients[connOrErr] = {
+				recvBuffer = "",
+				sendQueue = {},
+				sendOffset = 1,
+				pendingFileRequests = {},
+				pendingBundleRequests = {},
+				activeFileTransfer = nil,
+				activeBundleTransfer = nil,
+				hello = false,
 			helloPayload = nil,
 			player = nil,
 			bound = false,
@@ -1284,6 +1429,7 @@ local function processClients(state)
 		if connection.isOpen then
 			processClientReads(state, connection)
 			processPendingRetries(state, connection)
+			pumpBundleTransfer(state, connection)
 			pumpFileTransfer(state, connection)
 			flushSendQueue(state, connection)
 		end

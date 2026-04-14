@@ -1,4 +1,5 @@
 local json = require("main.json")
+local has_zip_integration, zip_integration = pcall(require, "librosaserver_src_integration")
 
 local M = {}
 
@@ -108,6 +109,8 @@ function M.getState()
 		scriptsByPath = {},
 		assetFiles = {},
 		assetFilesByPath = {},
+		syncBundles = {},
+		syncBundlesById = {},
 		loadedLevel = "",
 		persistentMode = "",
 		fileWatcher = nil,
@@ -410,7 +413,102 @@ function M.eventPayloadSize(payload)
 	return #encoded
 end
 
-local function collectScriptsRecursive(state, root, relativePath)
+local function requireZipIntegration()
+	if has_zip_integration and type(zip_integration) == "table" and type(zip_integration.createZip) == "function" then
+		return zip_integration
+	end
+
+	error("librosaserver_src_integration.createZip is unavailable")
+end
+
+local function newBundle(id, kind)
+	return {
+		id = id,
+		kind = kind,
+		files = {},
+		archiveInputs = {},
+		archive = "",
+		size = 0,
+		archiveSha256 = "",
+		contentSha256 = "",
+	}
+end
+
+local function bundleContentHash(files)
+	local parts = {}
+	for i = 1, #files do
+		local record = files[i]
+		parts[#parts + 1] = string.format(
+			"%s|%s|%s|%s",
+			tostring(record.kind or ""),
+			record.path,
+			tostring(record.size),
+			record.sha256
+		)
+	end
+	return crypto.sha256(table.concat(parts, "\n"))
+end
+
+local function finalizeBundle(bundle)
+	if #bundle.files == 0 then
+		return nil
+	end
+
+	table.sort(bundle.files, function(a, b)
+		return a.path < b.path
+	end)
+
+	local integration = requireZipIntegration()
+	local archive = integration.createZip(bundle.archiveInputs)
+	bundle.archive = archive
+	bundle.size = #archive
+	bundle.archiveSha256 = crypto.sha256(archive)
+	bundle.contentSha256 = bundleContentHash(bundle.files)
+	bundle.archiveInputs = nil
+	return bundle
+end
+
+local function resetSyncSnapshot(state)
+	state.scripts = {}
+	state.scriptsByPath = {}
+	state.assetFiles = {}
+	state.assetFilesByPath = {}
+	state.syncBundles = {}
+	state.syncBundlesById = {}
+end
+
+local function appendSnapshotRecord(state, bundle, record, bytes)
+	local snapshotRecord = {
+		path = record.path,
+		size = record.size,
+		sha256 = record.sha256,
+		mtime = record.mtime,
+		sourcePath = record.sourcePath,
+		kind = record.kind,
+	}
+
+	if snapshotRecord.kind == "script" then
+		table.insert(state.scripts, snapshotRecord)
+		state.scriptsByPath[snapshotRecord.path] = snapshotRecord
+	else
+		if state.assetFilesByPath[snapshotRecord.path] then
+			return
+		end
+		table.insert(state.assetFiles, snapshotRecord)
+		state.assetFilesByPath[snapshotRecord.path] = snapshotRecord
+	end
+
+	bundle.archiveInputs[snapshotRecord.path] = bytes
+	table.insert(bundle.files, {
+		path = snapshotRecord.path,
+		size = snapshotRecord.size,
+		sha256 = snapshotRecord.sha256,
+		mtime = snapshotRecord.mtime,
+		kind = snapshotRecord.kind,
+	})
+end
+
+local function collectScriptsRecursive(state, bundle, root, relativePath)
 	relativePath = relativePath or ""
 
 	local current = root
@@ -433,7 +531,7 @@ local function collectScriptsRecursive(state, root, relativePath)
 			if relativePath ~= "" then
 				child = relativePath .. "/" .. entry.name
 			end
-			collectScriptsRecursive(state, root, child)
+			collectScriptsRecursive(state, bundle, root, child)
 		else
 			local relPath = entry.name
 			if relativePath ~= "" then
@@ -444,41 +542,20 @@ local function collectScriptsRecursive(state, root, relativePath)
 				local fullPath = M.joinPath(root, relPath)
 				local bytes = M.readFile(fullPath)
 				if bytes then
-					local record = {
+					appendSnapshotRecord(state, bundle, {
 						path = relPath,
 						size = #bytes,
 						sha256 = crypto.sha256(bytes),
 						mtime = os.getLastWriteTime(fullPath),
 						sourcePath = fullPath,
-					}
-					table.insert(state.scripts, record)
-					state.scriptsByPath[relPath] = record
+						kind = "script",
+					}, bytes)
 				end
 			end
 		end
 
 		::continue::
 	end
-end
-
-function M.discoverScripts(state)
-	pcall(os.createDirectory, state.config.clientRoot)
-	local root = M.scriptsRoot(state.config)
-	pcall(os.createDirectory, root)
-
-	state.scripts = {}
-	state.scriptsByPath = {}
-
-	collectScriptsRecursive(state, root, "")
-	if #state.scripts == 0 then
-		collectScriptsRecursive(state, state.config.clientRoot, "")
-	end
-
-	table.sort(state.scripts, function(a, b)
-		return a.path < b.path
-	end)
-
-	return state.scripts
 end
 
 function M.normalizeLoadedLevel(rawLevel)
@@ -544,7 +621,7 @@ function M.discoverPersistentMode(state)
 	return state.persistentMode
 end
 
-local function collectAssetFilesRecursive(state, root, syncRootPrefix, relativePath)
+local function collectAssetFilesRecursive(state, bundle, root, syncRootPrefix, relativePath)
 	relativePath = relativePath or ""
 
 	local current = root
@@ -563,7 +640,7 @@ local function collectAssetFilesRecursive(state, root, syncRootPrefix, relativeP
 			if relativePath ~= "" then
 				child = relativePath .. "/" .. entry.name
 			end
-			collectAssetFilesRecursive(state, root, syncRootPrefix, child)
+			collectAssetFilesRecursive(state, bundle, root, syncRootPrefix, child)
 		else
 			local relPath = entry.name
 			if relativePath ~= "" then
@@ -580,17 +657,14 @@ local function collectAssetFilesRecursive(state, root, syncRootPrefix, relativeP
 				if not shouldSkip then
 					local bytes = M.readFile(fullPath)
 					if bytes then
-						local record = {
+						appendSnapshotRecord(state, bundle, {
 							path = syncPath,
 							size = #bytes,
 							sha256 = crypto.sha256(bytes),
 							mtime = os.getLastWriteTime(fullPath),
 							sourcePath = fullPath,
-						}
-						if not state.assetFilesByPath[syncPath] then
-							table.insert(state.assetFiles, record)
-							state.assetFilesByPath[syncPath] = record
-						end
+							kind = "asset",
+						}, bytes)
 					end
 				end
 			end
@@ -598,34 +672,61 @@ local function collectAssetFilesRecursive(state, root, syncRootPrefix, relativeP
 	end
 end
 
-function M.discoverAssetFiles(state)
-	state.assetFiles = {}
-	state.assetFilesByPath = {}
-
+function M.discoverSyncFiles(state)
+	M.discoverPersistentMode(state)
+	resetSyncSnapshot(state)
 	local normalizedLevel = M.normalizeLoadedLevel(server and server.loadedLevel or nil)
 	state.loadedLevel = normalizedLevel
 
-	if normalizedLevel ~= "" and not isDefaultGameMapName(normalizedLevel) then
-		local levelSyncRoot = "data/" .. normalizedLevel
-		collectAssetFilesRecursive(state, levelSyncRoot, levelSyncRoot, "")
+	pcall(os.createDirectory, state.config.clientRoot)
+	local scriptsRoot = M.scriptsRoot(state.config)
+	local assetsRoot = M.assetsRoot(state.config)
+	pcall(os.createDirectory, scriptsRoot)
+	pcall(os.createDirectory, assetsRoot)
+
+	local client_bundle = newBundle("clientroot", "clientroot")
+	collectScriptsRecursive(state, client_bundle, scriptsRoot, "")
+	if #state.scripts == 0 then
+		collectScriptsRecursive(state, client_bundle, state.config.clientRoot, "")
+	end
+	collectAssetFilesRecursive(state, client_bundle, assetsRoot, "", "")
+
+	client_bundle = finalizeBundle(client_bundle)
+	if client_bundle then
+		table.insert(state.syncBundles, client_bundle)
+		state.syncBundlesById[client_bundle.id] = client_bundle
 	end
 
-	pcall(os.createDirectory, state.config.clientRoot)
-	local root = M.assetsRoot(state.config)
-	pcall(os.createDirectory, root)
-	collectAssetFilesRecursive(state, root, "", "")
+	if normalizedLevel ~= "" and not isDefaultGameMapName(normalizedLevel) then
+		local levelSyncRoot = "data/" .. normalizedLevel
+		local map_bundle = newBundle("map", "map")
+		collectAssetFilesRecursive(state, map_bundle, levelSyncRoot, levelSyncRoot, "")
+		map_bundle = finalizeBundle(map_bundle)
+		if map_bundle then
+			table.insert(state.syncBundles, map_bundle)
+			state.syncBundlesById[map_bundle.id] = map_bundle
+		end
+	end
+
+	table.sort(state.scripts, function(a, b)
+		return a.path < b.path
+	end)
 
 	table.sort(state.assetFiles, function(a, b)
 		return a.path < b.path
 	end)
 
-	return state.assetFiles
+	return state.scripts, state.assetFiles, state.syncBundles
 end
 
-function M.discoverSyncFiles(state)
-	M.discoverPersistentMode(state)
-	M.discoverScripts(state)
-	M.discoverAssetFiles(state)
+function M.discoverScripts(state)
+	M.discoverSyncFiles(state)
+	return state.scripts
+end
+
+function M.discoverAssetFiles(state)
+	M.discoverSyncFiles(state)
+	return state.assetFiles
 end
 
 return M
