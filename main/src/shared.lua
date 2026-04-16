@@ -1,5 +1,6 @@
 local json = require("main.json")
-local has_zip_integration, zip_integration = pcall(require, "librosaserver_src_integration")
+pcall(require, "librosaserver_src_integration")
+local has_miniz_integration = pcall(require, "libminiz")
 
 local M = {}
 
@@ -414,11 +415,11 @@ function M.eventPayloadSize(payload)
 end
 
 local function requireZipIntegration()
-	if has_zip_integration and type(zip_integration) == "table" and type(zip_integration.createZip) == "function" then
-		return zip_integration
+	if has_miniz_integration and type(miniz) == "table" and type(miniz.createZip) == "function" then
+		return miniz
 	end
 
-	error("librosaserver_src_integration.createZip is unavailable")
+	error('require("libminiz") did not expose global miniz.createZip')
 end
 
 local function newBundle(id, kind)

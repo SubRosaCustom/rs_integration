@@ -2,6 +2,10 @@
 
 `rs_integration` is the server-side integration layer for SRC on RosaServer.
 
+It expects the native SRC server helper libraries to be present separately:
+- `require("librosaserver_src_integration")` for item type overrides
+- `require("libminiz")` for in-memory ZIP archive creation/extraction used by sync bundling
+
 ## TL;DR
 If you want SRC clients to actually work on a RosaServer deployment, this module is required.
 It owns the server-side transport, sync pipeline, and runtime coordination for SRC.
@@ -26,6 +30,7 @@ This repository is the server half of SRC. It is not the native client mod, and 
 - Server-owned reliable event IDs are allocated in the unsigned range `0x80000000` to `0xFFFFFFFF` to avoid client/server ID collisions.
 - `plugins/srcutils.lua` exposes `/srcwatch` and supports `srcwatch` as an alias.
 - Internal Lua helpers in this repo are now normalized to `snake_case`; API-facing names are preserved for compatibility with existing configs/plugins.
+- The native helper libraries now load as two separate Lua modules: `librosaserver_src_integration` and `libminiz`.
 
 ## Project Layout
 
