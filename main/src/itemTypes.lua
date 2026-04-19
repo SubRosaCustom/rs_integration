@@ -86,7 +86,7 @@ local function getItemTypeAddress(itemType)
 
 	local okAddress, address = pcall(memory.getAddress, itemType)
 	if not okAddress or type(address) ~= "number" or address <= 0 then
-		return nil, "failed to resolve item type address"
+		return nil, ("failed to resolve item type address (%s)").format(tostring(address))
 	end
 
 	return address
@@ -360,6 +360,7 @@ local function cloneItemType(state, src, sourceRef, targetIndex, overrides)
 		state.nextCustomItemTypeIndex = normalizedTargetIndex + 1
 	end
 
+	memory.writeFloat(memory.getBaseAddress() + 0x5a60d7c0 + (normalizedTargetIndex * 0x13D0) + 0x8, 0.1) -- set mass to 0.1 to make the itemType "valid"
 	local targetType = getItemTypeByIndex(normalizedTargetIndex)
 	assert(targetType ~= nil, "itemTypes.clone: failed to resolve target item type at index " .. tostring(normalizedTargetIndex))
 
