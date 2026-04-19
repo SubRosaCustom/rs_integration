@@ -6,14 +6,126 @@ plugin.description = "Utility commands and optional auto-refresh support for SRC
 
 require("main.src.init")
 
+local json = require("main.json")
 local watcher = require("main.src.watcher")
 local shared = require("main.src.shared")
 
 local src = assert(_G.src, "SRC utils requires main.src.init to initialize first")
 local state = shared.getState()
+local disabled_plugins_file = "disabledPlugins.json"
 
 local function refresh_now()
 	src.refreshSyncFiles()
+end
+
+local function scripts_root()
+	return shared.scriptsRoot(state.config)
+end
+
+local function disabled_plugins_path()
+	return shared.joinPath(scripts_root(), disabled_plugins_file)
+end
+
+local function read_disabled_plugins()
+	local source = shared.readFile(disabled_plugins_path())
+	if not source or source == "" then
+		return {}
+	end
+
+	local decoded = shared.safeJsonDecode(source)
+	if type(decoded) ~= "table" then
+		error(string.format("Invalid %s", disabled_plugins_file))
+	end
+
+	local names = {}
+	for i = 1, #decoded do
+		local name = decoded[i]
+		if type(name) == "string" and name ~= "" then
+			names[name] = true
+		end
+	end
+
+	return names
+end
+
+local function write_disabled_plugins(names)
+	local scripts_root_path = scripts_root()
+	pcall(os.createDirectory, state.config.clientRoot)
+	pcall(os.createDirectory, scripts_root_path)
+
+	local sorted = {}
+	for name, is_disabled in pairs(names) do
+		if is_disabled then
+			sorted[#sorted + 1] = name
+		end
+	end
+	table.sort(sorted)
+
+	local path = disabled_plugins_path()
+	if #sorted == 0 then
+		os.remove(path)
+		return
+	end
+
+	local file = assert(io.open(path, "wb"), string.format("Failed to open %s", path))
+	file:write(json.encode(sorted))
+	file:close()
+end
+
+local function collect_client_plugin_names()
+	local plugins_root = shared.joinPath(scripts_root(), "plugins")
+	local ok, entries = pcall(os.listDirectory, plugins_root)
+	if not ok or type(entries) ~= "table" then
+		return {}
+	end
+
+	local names = {}
+	for _, entry in ipairs(entries) do
+		if entry.isDirectory then
+			local init_path = shared.joinPath(shared.joinPath(plugins_root, entry.name), "init.lua")
+			if shared.readFile(init_path) then
+				names[entry.name] = true
+			end
+		else
+			local stem = entry.name:match("^(.+)%.lua$")
+			if stem and stem ~= "init" then
+				names[stem] = true
+			end
+		end
+	end
+
+	local sorted = {}
+	for name, _ in pairs(names) do
+		sorted[#sorted + 1] = name
+	end
+	table.sort(sorted)
+	return sorted
+end
+
+local function has_client_plugin(name)
+	local names = collect_client_plugin_names()
+	for i = 1, #names do
+		if names[i] == name then
+			return true
+		end
+	end
+	return false
+end
+
+local function auto_complete_client_plugin_arg(args)
+	if #args < 1 then
+		return
+	end
+
+	local beginning = string.lower(args[1])
+	local names = collect_client_plugin_names()
+	for i = 1, #names do
+		local name = names[i]
+		if string.lower(name):sub(1, #beginning) == beginning then
+			args[1] = name
+			return
+		end
+	end
 end
 
 local function count_clients()
@@ -166,6 +278,54 @@ plugin.commands["/srcwatch"] = {
 				tostring(state.config.clientRoot)
 			)
 		)
+	end,
+}
+
+plugin.commands["/srcenableplugin"] = {
+	info = "Enable a synced client plugin for all SRC clients.",
+	usage = "<plugin>",
+	autoComplete = auto_complete_client_plugin_arg,
+	canCall = function(ply)
+		return ply.isConsole or ply.isAdmin
+	end,
+	call = function(ply, _, args)
+		assert(src.enabled, "SRC is disabled")
+		assert(#args >= 1, "usage")
+
+		local plugin_name = args[1]
+		assert(has_client_plugin(plugin_name), "Invalid client plugin")
+
+		local disabled = read_disabled_plugins()
+		assert(disabled[plugin_name], "Plugin already enabled")
+
+		disabled[plugin_name] = nil
+		write_disabled_plugins(disabled)
+		refresh_now()
+		messagePlayerWrap(ply, string.format("Enabled SRC client plugin %s", plugin_name))
+	end,
+}
+
+plugin.commands["/srcdisableplugin"] = {
+	info = "Disable a synced client plugin for all SRC clients.",
+	usage = "<plugin>",
+	autoComplete = auto_complete_client_plugin_arg,
+	canCall = function(ply)
+		return ply.isConsole or ply.isAdmin
+	end,
+	call = function(ply, _, args)
+		assert(src.enabled, "SRC is disabled")
+		assert(#args >= 1, "usage")
+
+		local plugin_name = args[1]
+		assert(has_client_plugin(plugin_name), "Invalid client plugin")
+
+		local disabled = read_disabled_plugins()
+		assert(not disabled[plugin_name], "Plugin already disabled")
+
+		disabled[plugin_name] = true
+		write_disabled_plugins(disabled)
+		refresh_now()
+		messagePlayerWrap(ply, string.format("Disabled SRC client plugin %s", plugin_name))
 	end,
 }
 
