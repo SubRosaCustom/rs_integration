@@ -5,6 +5,7 @@ local shared = require("main.src.shared")
 local network = require("main.src.network")
 local browserMarker = require("main.src.browserMarker")
 local itemTypeSync = require("main.src.itemTypes")
+local humanModelSync = require("main.src.humanModels")
 
 local state = shared.getState()
 
@@ -12,6 +13,7 @@ local src = _G.src or {}
 _G.src = src
 
 itemTypeSync.install(state, src)
+humanModelSync.install(state, src)
 
 local function refreshNow()
 	shared.discoverSyncFiles(state)
@@ -133,34 +135,43 @@ end
 
 src.blob = src.binary
 
-local function ensureNonSRCGateHook()
-	if type(hook) ~= "table" or type(hook.add) ~= "function" then
-		log.warn("could not register non-SRC gate hook (hook.add unavailable)")
+local function nonSRCGraceTicks()
+	local tps = tonumber(server and server.TPS) or 60
+	return math.max(1, math.floor(tps * 5))
+end
+
+local function clearNonSRCPlayerTags(player)
+	if not player or not player.data then
 		return
 	end
 
-	hook.add("AccountTicketFound", "main.src.disallowNonSRCPlayers", function(acc)
-		if state.config.disallowNonSRCPlayers ~= true then
-			return
-		end
+	player.data.srcNonSRCDeadlineTick = nil
+	player.data.srcNonSRCKickQueued = nil
+end
 
-		if acc then
-			return
+local function enforceNonSRCPlayers()
+	for _, player in ipairs(players.getNonBots()) do
+		if player.connection then
+			local clientState = src.getClientState(player)
+			if clientState.connected then
+				clearNonSRCPlayerTags(player)
+			else
+				local deadlineTick = player.data.srcNonSRCDeadlineTick
+				if deadlineTick == nil then
+					player.data.srcNonSRCDeadlineTick = state.tick + nonSRCGraceTicks()
+				elseif player.data.srcNonSRCKickQueued ~= true and state.tick >= deadlineTick then
+					player:sendMessage("SRC is required on this server")
+					player.connection.timeoutTime = 50 * server.TPS
+					player.data.srcNonSRCKickQueued = true
+				end
+			end
+		else
+			clearNonSRCPlayerTags(player)
 		end
-
-		if type(hook.once) == "function" then
-			hook.once("SendConnectResponse", function(_, _, data)
-				data.message = "Only SRC allowed - discord.gg/subrosacustom"
-			end)
-		end
-
-		return hook.override
-	end)
+	end
 end
 
 if not state.hooksRegistered then
-	ensureNonSRCGateHook()
-
 	hook.add("ConfigLoaded", "main.src", function(isReload)
 		applyConfig(isReload)
 	end)
@@ -192,6 +203,14 @@ if not state.hooksRegistered then
 		end
 
 		network.logicStep(state)
+
+		if state.config.disallowNonSRCPlayers == true then
+			enforceNonSRCPlayers()
+		else
+			for _, player in ipairs(players.getNonBots()) do
+				clearNonSRCPlayerTags(player)
+			end
+		end
 	end)
 
 	hook.add("SendPacket", "main.src.udpSendPacket", function(address, port)

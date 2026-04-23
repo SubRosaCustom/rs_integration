@@ -1049,6 +1049,29 @@ local function queueItemTypeFireSoundsFrame(state, connection, index, soundAssig
 	return enqueueFrame(state, connection, "ITEM_TYPE_FIRE_SOUNDS", payload)
 end
 
+local function queueHumanModelFrame(state, connection, index, assignment)
+	local client = state.clients[connection]
+	if not client or not connection.isOpen or not client.hello then
+		return false
+	end
+
+	if type(assignment) ~= "table" then
+		return false
+	end
+
+	local male = assignment.male
+	local female = assignment.female
+	if type(male) ~= "string" or male == "" or type(female) ~= "string" or female == "" then
+		return false
+	end
+
+	return enqueueFrame(state, connection, "HUMAN_MODEL_DEF", {
+		index = index,
+		male = male,
+		female = female,
+	})
+end
+
 local function sendInitialCustomItemSync(state, connection)
 	local buildSyncPayload = state.buildCustomItemTypesSyncPayload
 	if type(buildSyncPayload) == "function" then
@@ -1090,6 +1113,13 @@ local function sendInitialCustomItemSync(state, connection)
 			log.warn("failed building custom item type sync payload: %s", tostring(payloadOrErr))
 		end
 	end
+
+	local humanModelAssignments = state.humanModelAssignments
+	if type(humanModelAssignments) == "table" then
+		for idx, assignment in pairs(humanModelAssignments) do
+			queueHumanModelFrame(state, connection, idx, assignment)
+		end
+	end
 end
 
 local function handleFrame(state, connection, frame)
@@ -1105,7 +1135,7 @@ local function handleFrame(state, connection, frame)
 
 	if frameType == "SRC_PING" then
 		enqueueFrame(state, connection, "SRC_PONG", {
-			protocol = 2,
+			protocol = 3,
 		})
 		return
 	end
@@ -1140,7 +1170,7 @@ local function handleFrame(state, connection, frame)
 		end
 
 		enqueueFrame(state, connection, "HELLO_ACK", {
-			protocol = 2,
+			protocol = 3,
 			port = server.port,
 			runtimeID = state.runtimeID,
 			syncGeneration = state.syncGeneration,
@@ -1724,6 +1754,40 @@ end
 
 function M.sendItemTypeFireSoundsToConnection(state, connection, index, soundAssignment)
 	return queueItemTypeFireSoundsFrame(state, connection, index, soundAssignment)
+end
+
+function M.sendHumanModel(state, player, index, assignment)
+	if player == nil then
+		local sent = 0
+		for connection, client in pairs(state.clients) do
+			local ply = connection.player
+			if connection.isOpen and client.hello and client.bound and (not ply or not ply.isBot) then
+				if queueHumanModelFrame(state, connection, index, assignment) then
+					sent = sent + 1
+				end
+			end
+		end
+		return sent
+	end
+
+	if type(player) ~= "userdata" or player.class ~= "Player" then
+		return false
+	end
+
+	if player.isBot then
+		return false
+	end
+
+	local connection = getPlayerConnection(state, player)
+	if not connection then
+		return false
+	end
+
+	return queueHumanModelFrame(state, connection, index, assignment)
+end
+
+function M.sendHumanModelToConnection(state, connection, index, assignment)
+	return queueHumanModelFrame(state, connection, index, assignment)
 end
 
 

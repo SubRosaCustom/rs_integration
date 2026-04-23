@@ -126,6 +126,8 @@ function M.getState()
 		itemTypeIconAssignments = {},
 		itemTypeTextureAssignments = {},
 		itemTypeFireSoundAssignments = {},
+		humanModelsAPIInstalled = false,
+		humanModelAssignments = {},
 		buildCustomItemTypesSyncPayload = nil,
 	}
 
@@ -338,7 +340,7 @@ end
 
 local function hasSafeAssetExtension(path)
 	local ext = fileExtension(path)
-	return ext == ".csx" or ext == ".sbc" or ext == ".sbl" or ext == ".cmo" or ext == ".png" or ext == ".wav"
+	return ext == ".csx" or ext == ".sbc" or ext == ".sbl" or ext == ".cmo" or ext == ".cmc" or ext == ".png" or ext == ".wav"
 end
 
 function M.isSafeSyncPath(path)
