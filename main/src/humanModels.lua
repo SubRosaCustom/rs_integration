@@ -3,8 +3,8 @@ local network = require("main.src.network")
 
 local M = {}
 
-local MIN_CUSTOM_HUMAN_MODEL_INDEX = 4
-local MAX_CUSTOM_HUMAN_MODEL_INDEX = 31
+local MIN_CUSTOM_HUMAN_MODEL_INDEX = 0
+local MAX_CUSTOM_HUMAN_MODEL_INDEX = 29
 
 local function normalizeIndex(index)
 	if type(index) ~= "number" or index ~= index then
