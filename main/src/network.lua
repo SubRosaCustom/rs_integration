@@ -975,6 +975,23 @@ local function queueItemTypesSyncFrame(state, connection, payload)
 	return enqueueBytes(state, connection, binaryFrame)
 end
 
+local function queueVehicleTypesSyncFrame(state, connection, payload)
+	local client = state.clients[connection]
+	if not client or not connection.isOpen or not client.hello then
+		return false
+	end
+
+	if type(payload) ~= "table" then
+		return false
+	end
+
+	if type(payload.vehicleTypes) ~= "table" or #payload.vehicleTypes == 0 then
+		return false
+	end
+
+	return enqueueFrame(state, connection, "VEHICLE_TYPES_SYNC", payload)
+end
+
 local function queueItemTypeModelFrame(state, connection, index, modelName)
 	local client = state.clients[connection]
 	if not client or not connection.isOpen or not client.hello then
@@ -982,6 +999,18 @@ local function queueItemTypeModelFrame(state, connection, index, modelName)
 	end
 
 	return enqueueFrame(state, connection, "ITEM_TYPE_MODEL", {
+		index = index,
+		model = modelName,
+	})
+end
+
+local function queueVehicleTypeModelFrame(state, connection, index, modelName)
+	local client = state.clients[connection]
+	if not client or not connection.isOpen or not client.hello then
+		return false
+	end
+
+	return enqueueFrame(state, connection, "VEHICLE_TYPE_MODEL", {
 		index = index,
 		model = modelName,
 	})
@@ -1047,6 +1076,18 @@ local function queueItemTypeFireSoundsFrame(state, connection, index, soundAssig
 	end
 
 	return enqueueFrame(state, connection, "ITEM_TYPE_FIRE_SOUNDS", payload)
+end
+
+local function queueVehicleTypeAudioFrame(state, connection, index, audioRef)
+	local client = state.clients[connection]
+	if not client or not connection.isOpen or not client.hello then
+		return false
+	end
+
+	return enqueueFrame(state, connection, "VEHICLE_TYPE_AUDIO", {
+		index = index,
+		audio = audioRef,
+	})
 end
 
 local function queueHumanModelFrame(state, connection, index, assignment)
@@ -1122,6 +1163,35 @@ local function sendInitialCustomItemSync(state, connection)
 	end
 end
 
+local function sendInitialCustomVehicleSync(state, connection)
+	local buildSyncPayload = state.buildCustomVehicleTypesSyncPayload
+	if type(buildSyncPayload) == "function" then
+		local ok, payloadOrErr = pcall(buildSyncPayload, connection)
+		if ok then
+			local payload = payloadOrErr
+			if type(payload) == "table" and type(payload.vehicleTypes) == "table" and #payload.vehicleTypes > 0 then
+				queueVehicleTypesSyncFrame(state, connection, payload)
+
+				local modelAssignments = state.vehicleTypeModelAssignments
+				if type(modelAssignments) == "table" then
+					for idx, modelName in pairs(modelAssignments) do
+						queueVehicleTypeModelFrame(state, connection, idx, modelName)
+					end
+				end
+
+				local audioAssignments = state.vehicleTypeAudioAssignments
+				if type(audioAssignments) == "table" then
+					for idx, audioRef in pairs(audioAssignments) do
+						queueVehicleTypeAudioFrame(state, connection, idx, audioRef)
+					end
+				end
+			end
+		else
+			log.warn("failed building custom vehicle type sync payload: %s", tostring(payloadOrErr))
+		end
+	end
+end
+
 local function handleFrame(state, connection, frame)
 	if type(frame) ~= "table" then
 		return
@@ -1179,6 +1249,7 @@ local function handleFrame(state, connection, frame)
 
 		if client.bound then
 			sendInitialCustomItemSync(state, connection)
+			sendInitialCustomVehicleSync(state, connection)
 		end
 		return
 	end
@@ -1449,6 +1520,7 @@ local function processClients(state)
 				if player then
 					if applyBoundPlayer(state, connection, client, player) then
 						sendInitialCustomItemSync(state, connection)
+						sendInitialCustomVehicleSync(state, connection)
 					end
 				end
 			end
@@ -1642,6 +1714,48 @@ function M.syncClientItemTypes(state, player, payload)
 	return queueItemTypesSyncFrame(state, connection, payload)
 end
 
+function M.syncClientVehicleTypes(state, player, payload)
+	if type(payload) ~= "table" then
+		return false
+	end
+
+	if player == nil then
+		local sent = 0
+		for connection, client in pairs(state.clients) do
+			local ply = connection.player
+			if connection.isOpen and client.hello and client.bound and (not ply or not ply.isBot) then
+				if queueVehicleTypesSyncFrame(state, connection, payload) then
+					sent = sent + 1
+				end
+			end
+		end
+		return sent
+	end
+
+	if type(player) ~= "userdata" or player.class ~= "Player" then
+		return false
+	end
+
+	if player.isBot then
+		return false
+	end
+
+	local connection = getPlayerConnection(state, player)
+	if not connection then
+		return false
+	end
+
+	return queueVehicleTypesSyncFrame(state, connection, payload)
+end
+
+function M.syncClientVehicleTypesToConnection(state, connection, payload)
+	if type(payload) ~= "table" then
+		return false
+	end
+
+	return queueVehicleTypesSyncFrame(state, connection, payload)
+end
+
 function M.syncClientItemTypesToConnection(state, connection, payload)
 	if type(payload) ~= "table" then
 		return false
@@ -1652,6 +1766,10 @@ end
 
 function M.sendItemTypeModelToConnection(state, connection, index, modelName)
 	return queueItemTypeModelFrame(state, connection, index, modelName)
+end
+
+function M.sendVehicleTypeModelToConnection(state, connection, index, modelName)
+	return queueVehicleTypeModelFrame(state, connection, index, modelName)
 end
 
 function M.sendItemTypeIcon(state, player, index, iconPath)
@@ -1788,6 +1906,70 @@ end
 
 function M.sendHumanModelToConnection(state, connection, index, assignment)
 	return queueHumanModelFrame(state, connection, index, assignment)
+end
+
+function M.sendVehicleTypeModel(state, player, index, modelName)
+	if player == nil then
+		local sent = 0
+		for connection, client in pairs(state.clients) do
+			local ply = connection.player
+			if connection.isOpen and client.hello and client.bound and (not ply or not ply.isBot) then
+				if queueVehicleTypeModelFrame(state, connection, index, modelName) then
+					sent = sent + 1
+				end
+			end
+		end
+		return sent
+	end
+
+	if type(player) ~= "userdata" or player.class ~= "Player" then
+		return false
+	end
+
+	if player.isBot then
+		return false
+	end
+
+	local connection = getPlayerConnection(state, player)
+	if not connection then
+		return false
+	end
+
+	return queueVehicleTypeModelFrame(state, connection, index, modelName)
+end
+
+function M.sendVehicleTypeAudio(state, player, index, audioRef)
+	if player == nil then
+		local sent = 0
+		for connection, client in pairs(state.clients) do
+			local ply = connection.player
+			if connection.isOpen and client.hello and client.bound and (not ply or not ply.isBot) then
+				if queueVehicleTypeAudioFrame(state, connection, index, audioRef) then
+					sent = sent + 1
+				end
+			end
+		end
+		return sent
+	end
+
+	if type(player) ~= "userdata" or player.class ~= "Player" then
+		return false
+	end
+
+	if player.isBot then
+		return false
+	end
+
+	local connection = getPlayerConnection(state, player)
+	if not connection then
+		return false
+	end
+
+	return queueVehicleTypeAudioFrame(state, connection, index, audioRef)
+end
+
+function M.sendVehicleTypeAudioToConnection(state, connection, index, audioRef)
+	return queueVehicleTypeAudioFrame(state, connection, index, audioRef)
 end
 
 

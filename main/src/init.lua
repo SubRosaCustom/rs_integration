@@ -5,6 +5,7 @@ local shared = require("main.src.shared")
 local network = require("main.src.network")
 local browserMarker = require("main.src.browserMarker")
 local itemTypeSync = require("main.src.itemTypes")
+local vehicleTypeSync = require("main.src.vehicleTypes")
 local humanModelSync = require("main.src.humanModels")
 
 local state = shared.getState()
@@ -13,6 +14,7 @@ local src = _G.src or {}
 _G.src = src
 
 itemTypeSync.install(state, src)
+vehicleTypeSync.install(state, src)
 humanModelSync.install(state, src)
 
 local function refreshNow()
@@ -99,6 +101,15 @@ function src.syncClientItemTypes(player, payload)
 	end
 	assert(type(payload) == "table", "src.syncClientItemTypes(player, payload): payload must be table")
 	return network.syncClientItemTypes(state, player, payload)
+end
+
+function src.syncClientVehicleTypes(player, payload)
+	if player ~= nil then
+		assert(type(player) == "userdata" and player.class == "Player", "src.syncClientVehicleTypes(player, payload): player must be Player or nil")
+		assert(not player.isBot, "src.syncClientVehicleTypes(player, payload): player cannot be a bot")
+	end
+	assert(type(payload) == "table", "src.syncClientVehicleTypes(player, payload): payload must be table")
+	return network.syncClientVehicleTypes(state, player, payload)
 end
 
 -- src.setItemTypeModel and src.setItemTypeIcon are installed
