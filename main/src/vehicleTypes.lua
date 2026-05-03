@@ -225,6 +225,10 @@ local function validateModel(model)
 	assert(type(model) == "string" and model ~= "", "vehicleTypes.new: model must be a non-empty string")
 	assert(not model:find("[/\\]"), "vehicleTypes.new: model must be an SBV name, not a path")
 	assert(not string.lower(model):match("%.tst$"), "vehicleTypes.new: TST models are not supported")
+	local path = "data/" .. model .. ".sbv"
+	local file = io.open(path, "rb")
+	assert(file ~= nil, "vehicleTypes.new: missing SBV file " .. path)
+	file:close()
 	return model
 end
 

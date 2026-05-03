@@ -205,6 +205,15 @@ local function toLower(value)
 	return string.lower(value)
 end
 
+local bitlib = bit32
+if not bitlib then
+	bitlib = require("bit")
+end
+
+local band = bitlib.band
+local bxor = bitlib.bxor
+local rshift = bitlib.rshift
+
 local DEFAULT_GAME_MODEL_CMO_FILES = {
 	["9mm.cmo"] = true,
 	["9mm_magazine.cmo"] = true,
@@ -249,6 +258,16 @@ local DEFAULT_GAME_MODEL_CMO_FILES = {
 	["mp5_magazine.cmo"] = true,
 	["soccerball.cmo"] = true,
 	["walkietalkie.cmo"] = true,
+}
+
+local DEFAULT_GAME_VEHICLE_SBV_CRC32 = {
+	["data/beamer2.sbv"] = 0x8C61F42F,
+	["data/golf5.sbv"] = 0xE14112E2,
+	["data/minivan2.sbv"] = 0x29053325,
+	["data/park5.sbv"] = 0x7AC22AC3,
+	["data/train04.sbv"] = 0xEEF0232B,
+	["data/turbo5.sbv"] = 0x52DED687,
+	["data/van4.sbv"] = 0x2F531C11,
 }
 
 local PROTECTED_TEXTURE_FILES = {
@@ -332,6 +351,34 @@ local function shouldSkipBundledModelCmo(syncPath)
 	return DEFAULT_GAME_MODEL_CMO_FILES[fileName] == true
 end
 
+local function crc32(bytes)
+	local crc = 0xFFFFFFFF
+	for i = 1, #bytes do
+		crc = bxor(crc, string.byte(bytes, i))
+		for _ = 1, 8 do
+			local mask = band(crc, 1)
+			crc = rshift(crc, 1)
+			if mask ~= 0 then
+				crc = bxor(crc, 0xEDB88320)
+			end
+		end
+	end
+	return bxor(crc, 0xFFFFFFFF)
+end
+
+local function shouldSkipBundledVehicleSbv(syncPath, bytes)
+	if type(syncPath) ~= "string" or type(bytes) ~= "string" then
+		return false
+	end
+
+	local expectedCrc = DEFAULT_GAME_VEHICLE_SBV_CRC32[toLower(syncPath)]
+	if not expectedCrc then
+		return false
+	end
+
+	return crc32(bytes) == expectedCrc
+end
+
 local function isProtectedTextureFile(syncPath)
 	if type(syncPath) ~= "string" then
 		return false
@@ -347,7 +394,7 @@ end
 
 local function hasSafeAssetExtension(path)
 	local ext = fileExtension(path)
-	return ext == ".csx" or ext == ".sbc" or ext == ".sbl" or ext == ".cmo" or ext == ".cmc" or ext == ".png" or ext == ".wav"
+	return ext == ".csx" or ext == ".sbc" or ext == ".sbl" or ext == ".cmo" or ext == ".cmc" or ext == ".png" or ext == ".wav" or ext == ".sbv"
 end
 
 function M.isSafeSyncPath(path)
@@ -667,6 +714,9 @@ local function collectAssetFilesRecursive(state, bundle, root, syncRootPrefix, r
 				if not shouldSkip then
 					local bytes = M.readFile(fullPath)
 					if bytes then
+						if shouldSkipBundledVehicleSbv(syncPath, bytes) then
+							goto continue
+						end
 						appendSnapshotRecord(state, bundle, {
 							path = syncPath,
 							size = #bytes,
@@ -679,6 +729,7 @@ local function collectAssetFilesRecursive(state, bundle, root, syncRootPrefix, r
 				end
 			end
 		end
+		::continue::
 	end
 end
 
@@ -700,6 +751,7 @@ function M.discoverSyncFiles(state)
 		collectScriptsRecursive(state, client_bundle, state.config.clientRoot, "")
 	end
 	collectAssetFilesRecursive(state, client_bundle, assetsRoot, "", "")
+	collectAssetFilesRecursive(state, client_bundle, "data", "data", "")
 
 	client_bundle = finalizeBundle(client_bundle)
 	if client_bundle then
