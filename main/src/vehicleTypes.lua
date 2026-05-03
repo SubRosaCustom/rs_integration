@@ -267,8 +267,8 @@ local function writeDefinitionToVehicleType(targetType, definition)
 	assert(address ~= nil, "vehicleTypes.new: failed to resolve vehicle type address (" .. tostring(addrErr) .. ")")
 
 	targetType.name = definition.name
-	memory.writeInt(address + OFFSET_USES_EXTERNAL_MODEL, definition.usesExternalModel)
 	memory.writeInt(address + OFFSET_CONTROLLABLE_STATE, definition.controllableState)
+	memory.writeInt(address + OFFSET_USES_EXTERNAL_MODEL, definition.usesExternalModel)
 	memory.writeInt(address + OFFSET_PRICE, definition.price)
 	memory.writeFloat(address + OFFSET_MASS, definition.mass)
 	memory.writeFloat(address + OFFSET_ACCELERATION, definition.acceleration)
@@ -381,8 +381,6 @@ local function constructVehicleType(state, src, definition, sourceIndex)
 	assert(targetType ~= nil, "vehicleTypes.new: failed to resolve target vehicle type at index " .. tostring(targetIndex))
 
 	local address = writeDefinitionToVehicleType(targetType, definition)
-	memory.writeInt(address + OFFSET_NUM_SEATS, 0)
-	writeSeatPositions(address, {})
 	finalizeVehicleTypeDefinition(targetType, definition, address)
 	recordDefinition(state, definition, sourceIndex)
 	broadcastCustomVehicleTypes(state, src)
