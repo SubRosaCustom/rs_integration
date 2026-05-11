@@ -14,12 +14,16 @@ local OFFSET_CONTROLLABLE_STATE = 0x8
 local OFFSET_PRICE = 0x34
 local OFFSET_MASS = 0x38
 local OFFSET_ACCELERATION = 0x17874
+local OFFSET_NUM_WHEELS = 0x17878
+local OFFSET_FIRST_WHEEL_MASS = 0x17890
+local OFFSET_FIRST_WHEEL_RADIUS = 0x17894
 local OFFSET_NUM_SEATS = 0x18318
 local OFFSET_SEAT_POS = 0x1831c
 local VECTOR_SIZE = 12
-local DEFAULT_WHEEL_RADIUS = 0.5
-local DEFAULT_WHEEL_MASS = 1.0
-local DEFAULT_INITIAL_WHEEL_FLAGS = 0
+local DEFAULT_WHEEL_RADIUS = 0.3125
+local DEFAULT_WHEEL_MASS = 12
+local DEFAULT_INITIAL_WHEEL_FLAGS = 2
+local ZERO_VEHICLE_TYPE_BYTES = string.rep("\0", VEHICLE_TYPE_SIZE)
 
 local function safeRead(obj, key)
 	local ok, value = pcall(function()
@@ -51,6 +55,7 @@ local function hasMemoryAPI()
 		and type(memory.writeFloat) == "function"
 		and type(memory.readInt) == "function"
 		and type(memory.writeInt) == "function"
+		and type(memory.writeBytes) == "function"
 end
 
 local function getNativeVehicleTypeAPI()
@@ -123,6 +128,21 @@ local function getVehicleTypeSlotAddress(index)
 	end
 
 	return memory.getBaseAddress() + SERVER_VEHICLE_TYPES_OFFSET + (normalized * VEHICLE_TYPE_SIZE)
+end
+
+local function clearVehicleTypeSlot(address)
+	local ok, err = pcall(memory.writeBytes, address, ZERO_VEHICLE_TYPE_BYTES)
+	assert(ok, "vehicleTypes.new: failed to clear target vehicle type slot (" .. tostring(err) .. ")")
+end
+
+local function clearCustomVehicleTypeSlots()
+	if not hasMemoryAPI() then
+		return
+	end
+
+	for index = FIRST_CUSTOM_INDEX, MAX_VEHICLE_TYPE_INDEX do
+		clearVehicleTypeSlot(memory.getBaseAddress() + SERVER_VEHICLE_TYPES_OFFSET + (index * VEHICLE_TYPE_SIZE))
+	end
 end
 
 local function normalizeSeatVector(value)
@@ -237,8 +257,56 @@ local function normalizeAudio(audio)
 	return audio
 end
 
+local function normalizeWheelRadius(wheelRadius)
+	if wheelRadius == nil then
+		return DEFAULT_WHEEL_RADIUS
+	end
+
+	assert(type(wheelRadius) == "number", "vehicleTypes.new: wheelRadius must be a number")
+	assert(wheelRadius > 0, "vehicleTypes.new: wheelRadius must be > 0")
+	return wheelRadius
+end
+
+local function normalizeWheelMass(wheelMass)
+	if wheelMass == nil then
+		return DEFAULT_WHEEL_MASS
+	end
+
+	assert(type(wheelMass) == "number", "vehicleTypes.new: wheelMass must be a number")
+	assert(wheelMass > 0, "vehicleTypes.new: wheelMass must be > 0")
+	return wheelMass
+end
+
+local function readSourceWheelRadius(address)
+	local numWheels = memory.readInt(address + OFFSET_NUM_WHEELS)
+	if type(numWheels) ~= "number" or numWheels <= 0 then
+		return DEFAULT_WHEEL_RADIUS
+	end
+
+	local wheelRadius = memory.readFloat(address + OFFSET_FIRST_WHEEL_RADIUS)
+	if type(wheelRadius) == "number" and wheelRadius > 0 then
+		return wheelRadius
+	end
+
+	return DEFAULT_WHEEL_RADIUS
+end
+
+local function readSourceWheelMass(address)
+	local numWheels = memory.readInt(address + OFFSET_NUM_WHEELS)
+	if type(numWheels) ~= "number" or numWheels <= 0 then
+		return DEFAULT_WHEEL_MASS
+	end
+
+	local wheelMass = memory.readFloat(address + OFFSET_FIRST_WHEEL_MASS)
+	if type(wheelMass) == "number" and wheelMass > 0 then
+		return wheelMass
+	end
+
+	return DEFAULT_WHEEL_MASS
+end
+
 local function buildDefinition(name, controllableState, usesExternalModel, price, mass, acceleration, model,
-		numSeats, seatPos, audio, index)
+		numSeats, seatPos, audio, wheelRadius, wheelMass, index)
 	assert(type(name) == "string" and name ~= "", "vehicleTypes.new: name must be a non-empty string")
 	assert(type(controllableState) == "number", "vehicleTypes.new: controllableState must be a number")
 	assert(type(usesExternalModel) == "boolean" or type(usesExternalModel) == "number",
@@ -263,6 +331,8 @@ local function buildDefinition(name, controllableState, usesExternalModel, price
 		numSeats = normalizedNumSeats,
 		seatPos = normalizeSeatPositions(normalizedNumSeats, seatPos),
 		audio = normalizeAudio(audio),
+		wheelRadius = normalizeWheelRadius(wheelRadius),
+		wheelMass = normalizeWheelMass(wheelMass),
 	}
 end
 
@@ -289,9 +359,9 @@ local function finalizeVehicleTypeDefinition(targetType, definition, address)
 	nativeApi.loadSBV(targetIndex, definition.model)
 	nativeApi.setupVehicleTypeNew(
 		targetIndex,
-		DEFAULT_WHEEL_RADIUS,
-		DEFAULT_WHEEL_MASS,
-		DEFAULT_INITIAL_WHEEL_FLAGS
+		DEFAULT_INITIAL_WHEEL_FLAGS,
+		definition.wheelRadius,
+		definition.wheelMass
 	)
 	memory.writeInt(address + OFFSET_NUM_SEATS, definition.numSeats)
 	writeSeatPositions(address, definition.seatPos)
@@ -356,6 +426,8 @@ local function recordDefinition(state, definition, sourceIndex)
 		seatPos = definition.seatPos,
 		model = definition.model,
 		audio = definition.audio,
+		wheelRadius = definition.wheelRadius,
+		wheelMass = definition.wheelMass,
 	}
 	state.vehicleTypeModelAssignments[definition.index] = definition.model
 	state.vehicleTypeAudioAssignments[definition.index] = definition.audio
@@ -379,6 +451,7 @@ local function constructVehicleType(state, src, definition, sourceIndex)
 
 	local slotAddress = getVehicleTypeSlotAddress(targetIndex)
 	assert(slotAddress ~= nil, "vehicleTypes.new: failed to resolve target slot address")
+	clearVehicleTypeSlot(slotAddress)
 	memory.writeFloat(slotAddress + OFFSET_MASS, definition.mass > 0 and definition.mass or 0.1)
 
 	local targetType = getVehicleTypeByIndex(targetIndex)
@@ -397,9 +470,9 @@ local function constructVehicleType(state, src, definition, sourceIndex)
 end
 
 local function newVehicleType(state, src, name, controllableState, usesExternalModel, price, mass, acceleration,
-		model, numSeats, seatPos, audio, index)
+		model, numSeats, seatPos, audio, wheelRadius, wheelMass, index)
 	local definition = buildDefinition(name, controllableState, usesExternalModel, price, mass, acceleration, model,
-			numSeats, seatPos, audio, index)
+			numSeats, seatPos, audio, wheelRadius, wheelMass, index)
 	return constructVehicleType(state, src, definition, -1)
 end
 
@@ -430,6 +503,8 @@ local function cloneVehicleType(state, src, sourceRef, targetIndexOrOverrides, o
 		numSeats = sourceNumSeats,
 		seatPos = readSeatPositions(sourceAddress),
 		audio = state.vehicleTypeAudioAssignments[sourceIndex] or safeRead(sourceType, "name"),
+		wheelRadius = readSourceWheelRadius(sourceAddress),
+		wheelMass = readSourceWheelMass(sourceAddress),
 	}
 
 	if type(overrides) == "table" then
@@ -453,6 +528,8 @@ local function cloneVehicleType(state, src, sourceRef, targetIndexOrOverrides, o
 		sourceDefinition.numSeats,
 		sourceDefinition.seatPos,
 		sourceDefinition.audio,
+		sourceDefinition.wheelRadius,
+		sourceDefinition.wheelMass,
 		sourceDefinition.index
 	)
 
@@ -484,11 +561,12 @@ function M.install(state, src)
 	state.buildCustomVehicleTypesSyncPayload = function()
 		return buildSyncPayload(state)
 	end
+	clearCustomVehicleTypeSlots()
 
 	vehicleTypes.new = function(name, controllableState, usesExternalModel, price, mass, acceleration, model,
-			numSeats, seatPos, audio, index)
+			numSeats, seatPos, audio, wheelRadius, wheelMass, index)
 		return newVehicleType(state, src, name, controllableState, usesExternalModel, price, mass, acceleration, model,
-			numSeats, seatPos, audio, index)
+			numSeats, seatPos, audio, wheelRadius, wheelMass, index)
 	end
 
 	vehicleTypes.clone = function(sourceRef, targetIndexOrOverrides, overrides)

@@ -733,6 +733,42 @@ local function collectAssetFilesRecursive(state, bundle, root, syncRootPrefix, r
 	end
 end
 
+local function collectTopLevelVehicleSbvFiles(state, bundle, root, syncRootPrefix)
+	local ok, entries = pcall(os.listDirectory, root)
+	if not ok or type(entries) ~= "table" then
+		return
+	end
+
+	for _, entry in ipairs(entries) do
+		if not entry.isDirectory then
+			local relPath = entry.name
+			local syncPath = relPath
+			if syncRootPrefix ~= "" then
+				syncPath = M.joinPath(syncRootPrefix, relPath)
+			end
+
+			if fileExtension(syncPath) == ".sbv" and M.isSafeAssetSyncPath(syncPath) then
+				local fullPath = M.joinPath(root, relPath)
+				local bytes = M.readFile(fullPath)
+				if bytes then
+					if shouldSkipBundledVehicleSbv(syncPath, bytes) then
+						goto continue
+					end
+					appendSnapshotRecord(state, bundle, {
+						path = syncPath,
+						size = #bytes,
+						sha256 = crypto.sha256(bytes),
+						mtime = os.getLastWriteTime(fullPath),
+						sourcePath = fullPath,
+						kind = "asset",
+					}, bytes)
+				end
+			end
+		end
+		::continue::
+	end
+end
+
 function M.discoverSyncFiles(state)
 	M.discoverPersistentMode(state)
 	resetSyncSnapshot(state)
@@ -751,7 +787,7 @@ function M.discoverSyncFiles(state)
 		collectScriptsRecursive(state, client_bundle, state.config.clientRoot, "")
 	end
 	collectAssetFilesRecursive(state, client_bundle, assetsRoot, "", "")
-	collectAssetFilesRecursive(state, client_bundle, "data", "data", "")
+	collectTopLevelVehicleSbvFiles(state, client_bundle, "data", "data")
 
 	client_bundle = finalizeBundle(client_bundle)
 	if client_bundle then
