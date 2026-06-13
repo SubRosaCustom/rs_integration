@@ -394,7 +394,7 @@ end
 
 local function hasSafeAssetExtension(path)
 	local ext = fileExtension(path)
-	return ext == ".csx" or ext == ".sbc" or ext == ".sbl" or ext == ".cmo" or ext == ".cmc" or ext == ".png" or ext == ".wav" or ext == ".sbv"
+	return ext == ".csx" or ext == ".sbc" or ext == ".sbl" or ext == ".cmo" or ext == ".cmc" or ext == ".itm" or ext == ".it3" or ext == ".png" or ext == ".wav" or ext == ".sbv"
 end
 
 function M.isSafeSyncPath(path)

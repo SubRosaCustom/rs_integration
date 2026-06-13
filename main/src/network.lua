@@ -1004,6 +1004,30 @@ local function queueItemTypeModelFrame(state, connection, index, modelName)
 	})
 end
 
+local function queueItemTypeITMFrame(state, connection, index, itmPath)
+	local client = state.clients[connection]
+	if not client or not connection.isOpen or not client.hello then
+		return false
+	end
+
+	return enqueueFrame(state, connection, "ITEM_TYPE_ITM", {
+		index = index,
+		itm = itmPath,
+	})
+end
+
+local function queueItemTypeIT3Frame(state, connection, index, it3Path)
+	local client = state.clients[connection]
+	if not client or not connection.isOpen or not client.hello then
+		return false
+	end
+
+	return enqueueFrame(state, connection, "ITEM_TYPE_IT3", {
+		index = index,
+		it3 = it3Path,
+	})
+end
+
 local function queueVehicleTypeModelFrame(state, connection, index, modelName)
 	local client = state.clients[connection]
 	if not client or not connection.isOpen or not client.hello then
@@ -1126,6 +1150,20 @@ local function sendInitialCustomItemSync(state, connection)
 				if type(modelAssignments) == "table" then
 					for idx, modelName in pairs(modelAssignments) do
 						queueItemTypeModelFrame(state, connection, idx, modelName)
+					end
+				end
+
+				local itmAssignments = state.itemTypeITMAssignments
+				if type(itmAssignments) == "table" then
+					for idx, itmPath in pairs(itmAssignments) do
+						queueItemTypeITMFrame(state, connection, idx, itmPath)
+					end
+				end
+
+				local it3Assignments = state.itemTypeIT3Assignments
+				if type(it3Assignments) == "table" then
+					for idx, it3Path in pairs(it3Assignments) do
+						queueItemTypeIT3Frame(state, connection, idx, it3Path)
 					end
 				end
 
@@ -1768,6 +1806,14 @@ function M.sendItemTypeModelToConnection(state, connection, index, modelName)
 	return queueItemTypeModelFrame(state, connection, index, modelName)
 end
 
+function M.sendItemTypeITMToConnection(state, connection, index, itmPath)
+	return queueItemTypeITMFrame(state, connection, index, itmPath)
+end
+
+function M.sendItemTypeIT3ToConnection(state, connection, index, it3Path)
+	return queueItemTypeIT3Frame(state, connection, index, it3Path)
+end
+
 function M.sendVehicleTypeModelToConnection(state, connection, index, modelName)
 	return queueVehicleTypeModelFrame(state, connection, index, modelName)
 end
@@ -1872,6 +1918,66 @@ end
 
 function M.sendItemTypeFireSoundsToConnection(state, connection, index, soundAssignment)
 	return queueItemTypeFireSoundsFrame(state, connection, index, soundAssignment)
+end
+
+function M.sendItemTypeITM(state, player, index, itmPath)
+	if player == nil then
+		local sent = 0
+		for connection, client in pairs(state.clients) do
+			local ply = connection.player
+			if connection.isOpen and client.hello and client.bound and (not ply or not ply.isBot) then
+				if queueItemTypeITMFrame(state, connection, index, itmPath) then
+					sent = sent + 1
+				end
+			end
+		end
+		return sent
+	end
+
+	if type(player) ~= "userdata" or player.class ~= "Player" then
+		return false
+	end
+
+	if player.isBot then
+		return false
+	end
+
+	local connection = getPlayerConnection(state, player)
+	if not connection then
+		return false
+	end
+
+	return queueItemTypeITMFrame(state, connection, index, itmPath)
+end
+
+function M.sendItemTypeIT3(state, player, index, it3Path)
+	if player == nil then
+		local sent = 0
+		for connection, client in pairs(state.clients) do
+			local ply = connection.player
+			if connection.isOpen and client.hello and client.bound and (not ply or not ply.isBot) then
+				if queueItemTypeIT3Frame(state, connection, index, it3Path) then
+					sent = sent + 1
+				end
+			end
+		end
+		return sent
+	end
+
+	if type(player) ~= "userdata" or player.class ~= "Player" then
+		return false
+	end
+
+	if player.isBot then
+		return false
+	end
+
+	local connection = getPlayerConnection(state, player)
+	if not connection then
+		return false
+	end
+
+	return queueItemTypeIT3Frame(state, connection, index, it3Path)
 end
 
 function M.sendHumanModel(state, player, index, assignment)

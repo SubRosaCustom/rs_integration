@@ -1,4 +1,5 @@
 local log = require("main.src.log")
+local shared = require("main.src.shared")
 
 local M = {}
 
@@ -45,6 +46,19 @@ end
 
 local function hasMemoryWriteAPI()
 	return hasMemoryReadAPI() and type(memory.writeBytes) == "function"
+end
+
+local function getNativeItemTypeAPI()
+	if type(srcIntegrationNative) ~= "table" then
+		return nil
+	end
+
+	if type(srcIntegrationNative.loadITM) ~= "function"
+		or type(srcIntegrationNative.loadIT3) ~= "function" then
+		return nil
+	end
+
+	return srcIntegrationNative
 end
 
 local function isItemTypeUserdata(value)
@@ -471,6 +485,42 @@ local function normalizeTextureAssignment(textureRef)
 	}
 end
 
+local function normalizeItemTypeFile(state, path, extension, label)
+	assert(type(path) == "string" and path ~= "", "src.setItemType" .. label .. ": path must be a non-empty string")
+	local trimmed = path:match("^%s*(.-)%s*$")
+	assert(trimmed ~= "", "src.setItemType" .. label .. ": path must be a non-empty string")
+	assert(not trimmed:find("\\", 1, true), "src.setItemType" .. label .. ": use forward slash paths")
+	assert(string.lower(trimmed):match("%" .. extension .. "$"), "src.setItemType" .. label .. ": path must end with " .. extension)
+
+	local candidates = {
+		trimmed,
+		shared.joinPath(shared.assetsRoot(state.config), trimmed),
+		shared.joinPath(state.config.clientRoot, trimmed),
+	}
+	for i = 1, #candidates do
+		local candidate = candidates[i]
+		local file = io.open(candidate, "rb")
+		if file ~= nil then
+			file:close()
+			return trimmed, candidate
+		end
+	end
+
+	assert(false, "src.setItemType" .. label .. ": missing file " .. trimmed)
+end
+
+local function applyNativeItemTypeFile(state, targetIndex, filePath, loaderName)
+	local nativeApi = getNativeItemTypeAPI()
+	assert(nativeApi ~= nil, "src.setItemType" .. loaderName .. ": srcIntegrationNative item model helpers unavailable")
+
+	local targetType = getItemTypeByIndex(targetIndex)
+	assert(targetType ~= nil, "src.setItemType" .. loaderName .. ": failed to resolve item type at index " .. tostring(targetIndex))
+
+	nativeApi["load" .. loaderName](targetIndex, filePath)
+	assert(snapshotCustomItemType(state, targetType, targetIndex),
+		"src.setItemType" .. loaderName .. ": failed to snapshot item type after native load")
+end
+
 function M.install(state, src)
 	if state.itemTypesAPIInstalled then
 		return
@@ -485,6 +535,8 @@ function M.install(state, src)
 	state.nextCustomItemTypeIndex = state.nextCustomItemTypeIndex or FIRST_CUSTOM_INDEX
 	state.itemTypeModelAssignments = state.itemTypeModelAssignments or {}
 	state.itemTypeIconAssignments = state.itemTypeIconAssignments or {}
+	state.itemTypeITMAssignments = state.itemTypeITMAssignments or {}
+	state.itemTypeIT3Assignments = state.itemTypeIT3Assignments or {}
 	state.itemTypeTextureAssignments = state.itemTypeTextureAssignments or {}
 	state.itemTypeFireSoundAssignments = state.itemTypeFireSoundAssignments or {}
 	state.buildCustomItemTypesSyncPayload = function()
@@ -544,6 +596,46 @@ function M.install(state, src)
 				state.itemTypeIconAssignments[targetIndex] = iconPath
 				local network = require("main.src.network")
 				return network.sendItemTypeIcon(state, player, targetIndex, iconPath)
+			end
+		end
+
+		if type(src.setItemTypeITM) ~= "function" then
+			src.setItemTypeITM = function(indexOrType, itmPath, player)
+				local targetIndex = getItemTypeIndex(indexOrType)
+				assert(type(targetIndex) == "number",
+					"src.setItemTypeITM(indexOrItemType, itmPath, player?): first arg must be number or ItemType")
+				assert(targetIndex >= 0 and targetIndex <= MAX_ITEM_TYPE_INDEX, "src.setItemTypeITM: index out of range")
+				if player ~= nil then
+					assert(type(player) == "userdata" and player.class == "Player", "src.setItemTypeITM: player must be Player or nil")
+					assert(not player.isBot, "src.setItemTypeITM: player cannot be a bot")
+				end
+
+				local syncPath, serverPath = normalizeItemTypeFile(state, itmPath, ".itm", "ITM")
+				applyNativeItemTypeFile(state, targetIndex, serverPath, "ITM")
+				state.itemTypeITMAssignments[targetIndex] = syncPath
+				local network = require("main.src.network")
+				src.syncCustomItemTypes(player)
+				return network.sendItemTypeITM(state, player, targetIndex, syncPath)
+			end
+		end
+
+		if type(src.setItemTypeIT3) ~= "function" then
+			src.setItemTypeIT3 = function(indexOrType, it3Path, player)
+				local targetIndex = getItemTypeIndex(indexOrType)
+				assert(type(targetIndex) == "number",
+					"src.setItemTypeIT3(indexOrItemType, it3Path, player?): first arg must be number or ItemType")
+				assert(targetIndex >= 0 and targetIndex <= MAX_ITEM_TYPE_INDEX, "src.setItemTypeIT3: index out of range")
+				if player ~= nil then
+					assert(type(player) == "userdata" and player.class == "Player", "src.setItemTypeIT3: player must be Player or nil")
+					assert(not player.isBot, "src.setItemTypeIT3: player cannot be a bot")
+				end
+
+				local syncPath, serverPath = normalizeItemTypeFile(state, it3Path, ".it3", "IT3")
+				applyNativeItemTypeFile(state, targetIndex, serverPath, "IT3")
+				state.itemTypeIT3Assignments[targetIndex] = syncPath
+				local network = require("main.src.network")
+				src.syncCustomItemTypes(player)
+				return network.sendItemTypeIT3(state, player, targetIndex, syncPath)
 			end
 		end
 
