@@ -1145,14 +1145,16 @@ local function sendInitialCustomItemSync(state, connection)
 			local payload = payloadOrErr
 			if type(payload) == "table" and type(payload.itemTypes) == "table" and #payload.itemTypes > 0 then
 				queueItemTypesSyncFrame(state, connection, payload)
+			end
 
-				local modelAssignments = state.itemTypeModelAssignments
-				if type(modelAssignments) == "table" then
-					for idx, modelName in pairs(modelAssignments) do
-						queueItemTypeModelFrame(state, connection, idx, modelName)
-					end
+			local modelAssignments = state.itemTypeModelAssignments
+			if type(modelAssignments) == "table" then
+				for idx, modelName in pairs(modelAssignments) do
+					queueItemTypeModelFrame(state, connection, idx, modelName)
 				end
+			end
 
+			if type(payload) == "table" and type(payload.itemTypes) == "table" and #payload.itemTypes > 0 then
 				local itmAssignments = state.itemTypeITMAssignments
 				if type(itmAssignments) == "table" then
 					for idx, itmPath in pairs(itmAssignments) do
