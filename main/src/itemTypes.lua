@@ -517,7 +517,9 @@ local function applyNativeItemTypeFile(state, targetIndex, filePath, loaderName)
 	assert(targetType ~= nil, "src.setItemType" .. loaderName .. ": failed to resolve item type at index " .. tostring(targetIndex))
 
 	nativeApi["load" .. loaderName](targetIndex, filePath)
-	assert(snapshotCustomItemType(state, targetType, targetIndex),
+	local existingEntry = state.customItemTypesByIndex and state.customItemTypesByIndex[targetIndex]
+	local sourceIndex = type(existingEntry) == "table" and existingEntry.sourceIndex or targetIndex
+	assert(snapshotCustomItemType(state, targetType, sourceIndex),
 		"src.setItemType" .. loaderName .. ": failed to snapshot item type after native load")
 end
 
