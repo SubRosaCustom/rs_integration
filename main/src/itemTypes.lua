@@ -5,6 +5,7 @@ local M = {}
 
 local PROTOCOL_VERSION = 1
 local ITEM_TYPE_SIZE = 0x13D0
+local ITEM_TYPE_NATIVE_BUFFER_OFFSETS = { 0x13A8, 0x13B0, 0x13C0, 0x13C8, }
 local MAX_ITEM_TYPE_COUNT = 255
 local MAX_ITEM_TYPE_INDEX = MAX_ITEM_TYPE_COUNT - 1
 local FIRST_CUSTOM_INDEX = 46
@@ -515,8 +516,17 @@ local function applyNativeItemTypeFile(state, targetIndex, filePath, loaderName)
 
 	local targetType = getItemTypeByIndex(targetIndex)
 	assert(targetType ~= nil, "src.setItemType" .. loaderName .. ": failed to resolve item type at index " .. tostring(targetIndex))
+	if not state.itemTypeNativeFileLoaded[targetIndex] then
+		local targetAddress, targetAddrErr = getItemTypeAddress(targetType)
+		assert(targetAddress, "src.setItemType" .. loaderName .. ": failed to resolve item type address (" .. tostring(targetAddrErr) .. ")")
+		for _, offset in ipairs(ITEM_TYPE_NATIVE_BUFFER_OFFSETS) do
+			local okWrite, writeErr = writeItemTypeBytes(targetAddress + offset, string.rep("\0", 8))
+			assert(okWrite, "src.setItemType" .. loaderName .. ": failed clearing inherited native buffer (" .. tostring(writeErr) .. ")")
+		end
+	end
 
 	nativeApi["load" .. loaderName](targetIndex, filePath)
+	state.itemTypeNativeFileLoaded[targetIndex] = true
 	local existingEntry = state.customItemTypesByIndex and state.customItemTypesByIndex[targetIndex]
 	local sourceIndex = type(existingEntry) == "table" and existingEntry.sourceIndex or targetIndex
 	assert(snapshotCustomItemType(state, targetType, sourceIndex),
@@ -539,6 +549,7 @@ function M.install(state, src)
 	state.itemTypeIconAssignments = state.itemTypeIconAssignments or {}
 	state.itemTypeITMAssignments = state.itemTypeITMAssignments or {}
 	state.itemTypeIT3Assignments = state.itemTypeIT3Assignments or {}
+	state.itemTypeNativeFileLoaded = state.itemTypeNativeFileLoaded or {}
 	state.itemTypeTextureAssignments = state.itemTypeTextureAssignments or {}
 	state.itemTypeFireSoundAssignments = state.itemTypeFireSoundAssignments or {}
 	state.buildCustomItemTypesSyncPayload = function()
@@ -577,6 +588,7 @@ function M.install(state, src)
 
 				state.itemTypeModelAssignments[targetIndex] = modelName
 				local network = require("main.src.network")
+				src.syncCustomItemTypes(player)
 				return network.sendItemTypeModel(state, player, targetIndex, modelName)
 			end
 		end
@@ -597,6 +609,7 @@ function M.install(state, src)
 
 				state.itemTypeIconAssignments[targetIndex] = iconPath
 				local network = require("main.src.network")
+				src.syncCustomItemTypes(player)
 				return network.sendItemTypeIcon(state, player, targetIndex, iconPath)
 			end
 		end
@@ -658,6 +671,7 @@ function M.install(state, src)
 				state.itemTypeTextureAssignments[targetIndex] = normalizedTexture
 
 				local network = require("main.src.network")
+				src.syncCustomItemTypes(player)
 				return network.sendItemTypeTexture(state, player, targetIndex, normalizedTexture)
 			end
 		end
@@ -681,6 +695,7 @@ function M.install(state, src)
 				state.itemTypeFireSoundAssignments[targetIndex] = normalizedSoundPaths
 
 				local network = require("main.src.network")
+				src.syncCustomItemTypes(player)
 				return network.sendItemTypeFireSounds(state, player, targetIndex, normalizedSoundPaths)
 			end
 		end

@@ -7,6 +7,7 @@ local browserMarker = require("main.src.browserMarker")
 local itemTypeSync = require("main.src.itemTypes")
 local vehicleTypeSync = require("main.src.vehicleTypes")
 local humanModelSync = require("main.src.humanModels")
+local worldMutationSync = require("main.src.worldMutations")
 
 local state = shared.getState()
 
@@ -93,6 +94,8 @@ function src.emitClientEvent(player, name, ...)
 
 	return network.emitClientEvent(state, player, name, hash, argsBytes)
 end
+
+worldMutationSync.install(state, src)
 
 function src.syncClientItemTypes(player, payload)
 	if player ~= nil then

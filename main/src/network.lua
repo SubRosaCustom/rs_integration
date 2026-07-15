@@ -1364,6 +1364,9 @@ local function handleFrame(state, connection, frame)
 		local client = state.clients[connection]
 		if client and client.hello and client.bound then
 			client.udpEventsReady = true
+			if state.sync_world_mutations then
+				state.sync_world_mutations(client.player)
+			end
 		end
 		return
 	end
