@@ -9,6 +9,16 @@ local M = {}
 local BINARY_MAGIC = "SRCB"
 local SERVER_EVENT_ID_MIN = 0x80000000
 local SERVER_EVENT_ID_MAX = 0xFFFFFFFF
+local MAX_EVENT_LOG_DETAIL_BYTES = 512
+local MAX_REPORTED_EVENT_FAILURE_HASHES = 256
+local VALID_CLIENT_EVENT_STATUSES = {
+	decode_error = true,
+	handler_error = true,
+	no_handler = true,
+	nothing_handled = true,
+	processed = true,
+	runtime_unavailable = true,
+}
 local disconnectOtherConnectionsForPlayer
 local loggedLegacyTcpEventFrame = false
 local unpackFn = table.unpack or unpack
@@ -76,6 +86,45 @@ local function ensureEventTrackingTables(client)
 	client.pendingResults = client.pendingResults or {}
 end
 
+local function should_log_event_failure(state, connection, event_hash)
+	local client = state.clients[connection]
+	if not client or event_hash == nil then
+		return true
+	end
+
+	client.reported_failure_event_hashes = client.reported_failure_event_hashes or {}
+	if client.reported_failure_event_hashes[event_hash] then
+		return false
+	end
+	if (client.reported_failure_event_hash_count or 0) >= MAX_REPORTED_EVENT_FAILURE_HASHES then
+		return false
+	end
+
+	client.reported_failure_event_hashes[event_hash] = true
+	client.reported_failure_event_hash_count = (client.reported_failure_event_hash_count or 0) + 1
+	return true
+end
+
+local function sanitize_log_text(value)
+	local ok, text = pcall(tostring, value)
+	if not ok then
+		return "<unprintable>"
+	end
+
+	text = text:gsub("[^ -~]", "?")
+	if #text > MAX_EVENT_LOG_DETAIL_BYTES then
+		text = text:sub(1, MAX_EVENT_LOG_DETAIL_BYTES - 3) .. "..."
+	end
+	return text
+end
+
+local function normalize_client_event_count(value)
+	if type(value) ~= "number" or value ~= value or value < 0 then
+		return 0
+	end
+	return math.min(math.floor(value), 0xFFFF)
+end
+
 local function markEventRecentlyCompleted(state, client, msgId)
 	local keepTicks = math.max(120, tonumber(state.config.eventProcessTimeoutTicks) or 180)
 	client.recentCompleted[msgId] = state.tick + keepTicks
@@ -89,17 +138,22 @@ local function cleanupRecentCompletions(state, client)
 	end
 end
 
-local function logEventResult(state, connection, name, msgId, result)
+local function logEventResult(state, connection, name, event_hash, msgId, result)
 	local args = result and result.args or nil
-	local status = tostring((args and args[1]) or result and result.status or "")
-	local handled = tonumber((args and args[2]) or result and result.handled) or 0
-	local errors = tonumber((args and args[3]) or result and result.errors) or 0
-	local detail = tostring((args and args[4]) or result and result.detail or "")
+	local claimed_status = (args and args[1]) or result and result.status
+	local claimed_detail = (args and args[4]) or result and result.detail
+	local status = type(claimed_status) == "string" and claimed_status or ""
+	local handled = normalize_client_event_count((args and args[2]) or result and result.handled)
+	local errors = normalize_client_event_count((args and args[3]) or result and result.errors)
+	local detail = type(claimed_detail) == "string" and sanitize_log_text(claimed_detail) or ""
+	if not VALID_CLIENT_EVENT_STATUSES[status] then
+		status = "invalid_client_status"
+	end
 
 	if status == "processed" and errors == 0 then
 		if state.config.eventDebugLogSuccess then
 			log.info(
-				"event processed [OK]: name=%s id=%s client=%s handlers=%s",
+				"client-claimed event processed [UNTRUSTED_CLIENT_CLAIM]: name=%s id=%s client=%s handlers=%s",
 				name or "?",
 				msgId,
 				shared.clientId(connection),
@@ -107,8 +161,12 @@ local function logEventResult(state, connection, name, msgId, result)
 			)
 		end
 	else
+		if not should_log_event_failure(state, connection, event_hash) then
+			return
+		end
+
 		log.warn(
-			"event processing failed [SRC_OR_SRCC_NEVER_PROCESSED_IT]: name=%s id=%s client=%s status=%s handlers=%s errors=%s detail=%s",
+			"client-claimed event failure [UNTRUSTED]: name=%s id=%s client=%s status=%s handlers=%s errors=%s detail=%s",
 			name or "?",
 			msgId,
 			shared.clientId(connection),
@@ -675,12 +733,14 @@ local function handleClientEvent(state, connection, message)
 	local registry = state.eventHandlersByHash and state.eventHandlersByHash[eventHash] or nil
 	local eventName = registry and registry.name or udpEvents.formatEventHash(eventHash)
 	if not registry or not registry.callbacks or #registry.callbacks == 0 then
-		log.warn(
-			"event rejected [NOTHING_HANDLED_EVENT_ON_SERVER]: hash=%s id=%s client=%s",
-			tostring(eventName),
-			tostring(msgId),
-			shared.clientId(connection)
-		)
+		if should_log_event_failure(state, connection, eventHash) then
+			log.warn(
+				"event rejected [NOTHING_HANDLED_EVENT_ON_SERVER]: hash=%s id=%s client=%s",
+				tostring(eventName),
+				tostring(msgId),
+				shared.clientId(connection)
+			)
+		end
 		return {
 			status = "nothing_handled",
 			handled = 0,
@@ -699,8 +759,15 @@ local function handleClientEvent(state, connection, message)
 		handled = handled + 1
 		if not ok then
 			errors = errors + 1
-			detail = tostring(err)
-			log.warn("src.onClientEvent callback failed (%s): %s", eventName, err)
+			detail = "Server event handler failed"
+			if should_log_event_failure(state, connection, eventHash) then
+				log.warn(
+					"server Lua event handler failed: name=%s client=%s detail=%s",
+					eventName,
+					shared.clientId(connection),
+					sanitize_log_text(err)
+				)
+			end
 		end
 	end
 
@@ -875,7 +942,7 @@ local function handleReliableEventAckBatchPayload(state, connection, msgIds)
 						local trackedName = client.awaitingResults[msgId] and client.awaitingResults[msgId].name or pending.name
 						client.awaitingResults[msgId] = nil
 						markEventRecentlyCompleted(state, client, msgId)
-						logEventResult(state, connection, trackedName, msgId, early)
+						logEventResult(state, connection, trackedName, pending.eventHash, msgId, early)
 					end
 				elseif client.pendingResults[msgId] then
 					client.pendingResults[msgId] = nil
@@ -931,7 +998,7 @@ local function handleReliableEventResultPayload(state, connection, message)
 	client.awaitingResults[msgId] = nil
 	client.earlyResults[msgId] = nil
 	markEventRecentlyCompleted(state, client, msgId)
-	logEventResult(state, connection, tracked.name, msgId, result)
+	logEventResult(state, connection, tracked.name, tracked.eventHash, msgId, result)
 end
 
 local function queueItemTypesSyncFrame(state, connection, payload)
@@ -2163,36 +2230,42 @@ function M.onPostPacketReceive(state)
 	for _, message in ipairs(decoded.messages) do
 		if message.kind == 1 then
 			if client.hello and client.bound then
+				ensureEventTrackingTables(client)
 				udpEvents.queueAck(client, message.msgId)
-				local result = handleClientEvent(state, connection, message)
-				local resultPayload, encodeErr = eventCodec.encodeArgs(
-					result.status,
-					result.handled,
-					result.errors,
-					result.detail or ""
-				)
-				if resultPayload then
-					if not queueReliableUdpResult(
-						state,
-						connection,
-						result.eventName or udpEvents.formatEventHash(message.eventHash),
-						message.msgId,
-						message.eventHash,
-						resultPayload
-					) then
-						log.warn(
-							"failed to queue result for client event (%s) id=%s client=%s",
+				local pending_result = client.pendingResults[message.msgId]
+				if pending_result then
+					udpEvents.enqueue(client, pending_result.bytes)
+				elseif not client.recentCompleted[message.msgId] then
+					local result = handleClientEvent(state, connection, message)
+					local resultPayload, encodeErr = eventCodec.encodeArgs(
+						result.status,
+						result.handled,
+						result.errors,
+						result.detail or ""
+					)
+					if resultPayload then
+						if not queueReliableUdpResult(
+							state,
+							connection,
 							result.eventName or udpEvents.formatEventHash(message.eventHash),
 							message.msgId,
-							shared.clientId(connection)
+							message.eventHash,
+							resultPayload
+						) then
+							log.warn(
+								"failed to queue result for client event (%s) id=%s client=%s",
+								result.eventName or udpEvents.formatEventHash(message.eventHash),
+								message.msgId,
+								shared.clientId(connection)
+							)
+						end
+					else
+						log.warn(
+							"failed to encode result payload for client event (%s): %s",
+							result.eventName or udpEvents.formatEventHash(message.eventHash),
+							tostring(encodeErr)
 						)
 					end
-				else
-					log.warn(
-						"failed to encode result payload for client event (%s): %s",
-						result.eventName or udpEvents.formatEventHash(message.eventHash),
-						tostring(encodeErr)
-					)
 				end
 			end
 		elseif message.kind == 2 then
