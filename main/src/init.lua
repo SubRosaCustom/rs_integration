@@ -10,6 +10,8 @@ local humanModelSync = require("main.src.humanModels")
 local worldMutationSync = require("main.src.worldMutations")
 
 local state = shared.getState()
+state.srcAdmissionRejections = state.srcAdmissionRejections or {}
+state.srcRecoveryGraceUntil = os.realClock() + 60
 
 local src = _G.src or {}
 _G.src = src
@@ -127,6 +129,8 @@ function src.getClientState(player)
 		enabled = src.enabled,
 		connected = connected,
 		hello = client and client.hello or false,
+		syncState = client and client.sync_state or "disconnected",
+		ready = client and client.sync_state == "ready" or false,
 		scriptCount = #state.scripts,
 		assetFileCount = #state.assetFiles,
 		loadedLevel = state.loadedLevel,
@@ -151,7 +155,7 @@ src.blob = src.binary
 
 local function nonSRCGraceTicks()
 	local tps = tonumber(server and server.TPS) or 60
-	return math.max(1, math.floor(tps * 5))
+	return math.max(1, math.floor(tps * 30))
 end
 
 local function clearNonSRCPlayerTags(player)
@@ -164,6 +168,10 @@ local function clearNonSRCPlayerTags(player)
 end
 
 local function enforceNonSRCPlayers()
+	if os.realClock() < state.srcRecoveryGraceUntil then
+		return
+	end
+
 	for _, player in ipairs(players.getNonBots()) do
 		if player.connection then
 			local clientState = src.getClientState(player)
@@ -186,12 +194,49 @@ local function enforceNonSRCPlayers()
 end
 
 if not state.hooksRegistered then
+	hook.add("AccountTicketFound", "main.src.admission", function(account)
+		if state.config.disallowNonSRCPlayers ~= true then
+			return
+		end
+
+		local native = rawget(_G, "srcIntegrationNative")
+		local ok, endpoint = pcall(
+			type(native) == "table" and native.currentPacketEndpoint or function() return nil end
+		)
+		if ok and type(endpoint) == "table" and network.authorizeAccountTicket(state, account, endpoint) then
+			return
+		end
+
+		if ok and type(endpoint) == "table" then
+			local key = tostring(endpoint.address) .. ":" .. tostring(endpoint.port)
+			state.srcAdmissionRejections[key] = {
+				message = "SRC is required to play on this server.",
+				expires = os.realClock() + 10,
+			}
+		end
+		return hook.override
+	end)
+
+	hook.add("SendConnectResponse", "main.src.admissionMessage", function(address, port, data)
+		local key = tostring(address) .. ":" .. tostring(port)
+		local rejection = state.srcAdmissionRejections[key]
+		if rejection then
+			state.srcAdmissionRejections[key] = nil
+			data.message = rejection.message
+		end
+	end)
+
 	hook.add("ConfigLoaded", "main.src", function(isReload)
 		applyConfig(isReload)
 	end)
 
 	hook.add("Logic", "main.src", function()
 		state.tick = state.tick + 1
+		for key, rejection in pairs(state.srcAdmissionRejections) do
+			if rejection.expires <= os.realClock() then
+				state.srcAdmissionRejections[key] = nil
+			end
+		end
 
 		if not src.enabled then
 			return
@@ -201,8 +246,7 @@ if not state.hooksRegistered then
 			type(hook) == "table" and hook.persistentMode or nil
 		)
 		if normalizedPersistentMode ~= state.persistentMode then
-			shared.discoverPersistentMode(state)
-			src.refresh()
+			refreshNow()
 			log.info(
 				"persistent mode changed to %s; sync refresh queued",
 				state.persistentMode ~= "" and state.persistentMode or "<none>"
@@ -236,8 +280,10 @@ if not state.hooksRegistered then
 		browserMarker.onPostSendPacket(state)
 	end)
 
-	hook.add("PostPacketReceive", "main.src.udpPostPacketReceive", function()
-		network.onPostPacketReceive(state)
+	hook.add("PacketReceive", "main.src.udpPacketReceive", function()
+		if network.onPacketReceive(state) then
+			return hook.override
+		end
 	end)
 
 	hook.add("InterruptSignal", "main.src", function()

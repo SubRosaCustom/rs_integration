@@ -3,12 +3,8 @@ local eventCodec = require("main.src.eventCodec")
 
 local M = {}
 
-local PACKET_READ_ADDRESS_ADDRESS = 0x39085C84
-local PACKET_READ_PORT_ADDRESS = 0x39085C88
-local RECV_PACKET_SIZE_ADDRESS = 0x39085C98
-local RECV_PACKET_ADDRESS = 0x39085CA4
 local MAX_DATAGRAM_SIZE = 1200
-local DATAGRAM_HEADER_SIZE = 28
+local DATAGRAM_HEADER_SIZE = 44
 local MAX_BATCH_SIZE = MAX_DATAGRAM_SIZE - DATAGRAM_HEADER_SIZE
 local MAX_RAW_MESSAGE_SIZE = MAX_BATCH_SIZE - 8
 local GAME_MAGIC = "7DFP"
@@ -20,54 +16,6 @@ local EMPTY_BATCH = string.pack(">BBI2", BATCH_VERSION, 0, 0)
 local KIND_RELIABLE_EVENT = 1
 local KIND_RELIABLE_ACK_BATCH = 2
 local KIND_RELIABLE_RESULT = 3
-
-local function get_base_address()
-	local ok, value = pcall(memory.getBaseAddress)
-	if not ok or type(value) ~= "number" or value == 0 then
-		return nil
-	end
-	return math.floor(value)
-end
-
-local function read_int(offset)
-	local base_address = get_base_address()
-	if not base_address then
-		return nil
-	end
-	local ok, value = pcall(memory.readInt, base_address + offset)
-	if not ok or type(value) ~= "number" then
-		return nil
-	end
-	return math.floor(value)
-end
-
-local function write_int(offset, value)
-	local base_address = get_base_address()
-	if not base_address then
-		return false
-	end
-	return pcall(memory.writeInt, base_address + offset, math.floor(value))
-end
-
-local function read_bytes(offset, size)
-	local base_address = get_base_address()
-	if not base_address then
-		return nil
-	end
-	local ok, value = pcall(memory.readBytes, base_address + offset, size)
-	if not ok or type(value) ~= "string" then
-		return nil
-	end
-	return value
-end
-
-local function write_bytes(offset, value)
-	local base_address = get_base_address()
-	if not base_address then
-		return false
-	end
-	return pcall(memory.writeBytes, base_address + offset, value)
-end
 
 local function normalizePort(port)
 	local numberPort = tonumber(port)
@@ -81,35 +29,15 @@ local function normalizePort(port)
 	return numberPort
 end
 
-local function ipv4_from_integer(value)
-	if type(value) ~= "number" then
-		return nil
-	end
-
-	local unsigned = value
-	if unsigned < 0 then
-		unsigned = unsigned + 0x100000000
-	end
-
-	local d = unsigned % 256
-	unsigned = math.floor(unsigned / 256)
-	local c = unsigned % 256
-	unsigned = math.floor(unsigned / 256)
-	local b = unsigned % 256
-	unsigned = math.floor(unsigned / 256)
-	local a = unsigned % 256
-	return string.format("%d.%d.%d.%d", a, b, c, d)
-end
-
 local function build_datagram(token, batch)
-	if type(token) ~= "string" or #token ~= 16 then
+	if type(token) ~= "string" or #token ~= 32 then
 		return nil, "invalid UDP token"
 	end
 	if type(batch) ~= "string" or #batch < 4 or #batch > MAX_BATCH_SIZE then
 		return nil, "UDP batch size out of range"
 	end
 
-	return string.pack(">c4c4BBc16I2", GAME_MAGIC, MAGIC, DATAGRAM_VERSION, 0, token, #batch) .. batch
+	return string.pack(">c4c4BBc32I2", GAME_MAGIC, MAGIC, DATAGRAM_VERSION, 0, token, #batch) .. batch
 end
 
 local function parse_datagram(raw)
@@ -118,7 +46,7 @@ local function parse_datagram(raw)
 	end
 
 	local game_magic, magic, version, flags, token, batch_size, next_pos =
-		string.unpack(">c4c4BBc16I2", raw)
+		string.unpack(">c4c4BBc32I2", raw)
 	if game_magic ~= GAME_MAGIC or magic ~= MAGIC then
 		return nil
 	end
@@ -461,7 +389,7 @@ function M.new_token()
 	end
 
 	local ok, token = pcall(native.randomToken)
-	if not ok or type(token) ~= "string" or #token ~= 16 then
+	if not ok or type(token) ~= "string" or #token ~= 32 then
 		return nil
 	end
 	return token
@@ -557,54 +485,60 @@ function M.onSendPacket(state, address, port)
 	end
 end
 
-function M.onPostPacketReceive(state)
-	local packet_size = read_int(RECV_PACKET_SIZE_ADDRESS)
-	if type(packet_size) ~= "number" or packet_size < DATAGRAM_HEADER_SIZE
-		or packet_size > MAX_DATAGRAM_SIZE then
-		return nil
+function M.onPacketReceive(state)
+	local native = rawget(_G, "srcIntegrationNative")
+	if type(native) ~= "table" or type(native.drainSrcPackets) ~= "function" then
+		return {}, false
 	end
 
-	local raw = read_bytes(RECV_PACKET_ADDRESS, packet_size)
-	if type(raw) ~= "string" or #raw ~= packet_size
-		or raw:sub(1, 8) ~= GAME_MAGIC .. MAGIC then
-		return nil
+	local ok, drained_or_err = pcall(native.drainSrcPackets)
+	if not ok or type(drained_or_err) ~= "table" then
+		log.warn("standalone UDP drain failed: %s", tostring(drained_or_err))
+		return {}, false
 	end
 
-	write_bytes(RECV_PACKET_ADDRESS, string.rep("\0", packet_size))
-	write_int(RECV_PACKET_SIZE_ADDRESS, 0)
+	local decoded = {}
+	for _, packet in ipairs(drained_or_err.packets or {}) do
+		repeat
+			local token, batch, datagram_err = parse_datagram(packet.data)
+			if not token then
+				log.warn("invalid standalone UDP datagram: %s", tostring(datagram_err))
+				break
+			end
 
-	local token, batch, datagram_err = parse_datagram(raw)
-	if not token then
-		log.warn("invalid standalone UDP datagram: %s", tostring(datagram_err))
-		return nil
+			local address = tostring(packet.address)
+			local port = normalizePort(packet.port)
+			local connection, client = find_client_for_datagram(state, token, address)
+			if not client or not port then
+				break
+			end
+			client.game_address = address
+			client.game_port = port
+
+			local messages, decode_err = decodeBatch(batch)
+			if not messages then
+				log.warn("invalid inbound SRC UDP batch: %s", tostring(decode_err))
+				break
+			end
+
+			if #messages == 0 then
+				local reply = build_datagram(token, EMPTY_BATCH)
+				if type(native.sendPacket) == "function" then
+					pcall(native.sendPacket, address, port, reply)
+				end
+			end
+
+			decoded[#decoded + 1] = {
+				connection = connection,
+				client = client,
+				messages = messages,
+			}
+		until true
 	end
 
-	local address = ipv4_from_integer(read_int(PACKET_READ_ADDRESS_ADDRESS) or 0)
-	local port = normalizePort(read_int(PACKET_READ_PORT_ADDRESS))
-	local connection, client = find_client_for_datagram(state, token, address)
-	if not client or not port then
-		return nil
-	end
-
-	local messages, decode_err = decodeBatch(batch)
-	if not messages then
-		log.warn("invalid inbound SRC UDP batch: %s", tostring(decode_err))
-		return nil
-	end
-
-	if #messages == 0 then
-		local native = rawget(_G, "srcIntegrationNative")
-		local reply = build_datagram(token, EMPTY_BATCH)
-		if type(native) == "table" and type(native.sendPacket) == "function" then
-			pcall(native.sendPacket, address, port, reply)
-		end
-	end
-
-	return {
-		connection = connection,
-		client = client,
-		messages = messages,
-	}
+	local should_override = (tonumber(drained_or_err.drained) or 0) > 0
+		and drained_or_err.vanillaPending ~= true
+	return decoded, should_override
 end
 
 return M

@@ -97,6 +97,7 @@ function M.getState()
 		moduleLoaded = false,
 		runtimeID = tostring(os.realClock and os.realClock() or os.clock()),
 		syncGeneration = 1,
+		manifestHash = "",
 		tcpBindInProgress = false,
 		tick = 0,
 		nextEventID = 0x80000000,
@@ -813,6 +814,21 @@ function M.discoverSyncFiles(state)
 	table.sort(state.assetFiles, function(a, b)
 		return a.path < b.path
 	end)
+
+	local manifest = {
+		state.loadedLevel,
+		state.persistentMode,
+	}
+	for _, bundle in ipairs(state.syncBundles) do
+		manifest[#manifest + 1] = table.concat({
+			bundle.id,
+			bundle.kind,
+			tostring(bundle.size),
+			bundle.archiveSha256,
+			bundle.contentSha256,
+		}, "|")
+	end
+	state.manifestHash = crypto.sha256(table.concat(manifest, "\n"))
 
 	return state.scripts, state.assetFiles, state.syncBundles
 end

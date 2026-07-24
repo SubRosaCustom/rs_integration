@@ -280,6 +280,9 @@ local function resetClientSyncState(client)
 	client.recentCompleted = {}
 	client.sendQueue = {}
 	client.sendOffset = 1
+	client.sync_state = client.hello and "capable" or "connected"
+	client.ready_generation = 0
+	client.ready_manifest_hash = nil
 	udpEvents.resetClient(client)
 end
 
@@ -1312,7 +1315,7 @@ local function handleFrame(state, connection, frame)
 
 	if frameType == "SRC_PING" then
 		enqueueFrame(state, connection, "SRC_PONG", {
-			protocol = 4,
+			protocol = 5,
 		})
 		return
 	end
@@ -1339,6 +1342,7 @@ local function handleFrame(state, connection, frame)
 		client.hello = true
 		client.helloPayload = payload
 		client.generation = state.syncGeneration
+		client.sync_state = "capable"
 
 		local player, bindErr = resolveClientPlayerFromHello(state, connection, payload)
 		if player then
@@ -1359,11 +1363,12 @@ local function handleFrame(state, connection, frame)
 		end
 
 		enqueueFrame(state, connection, "HELLO_ACK", {
-			protocol = 4,
+			protocol = 5,
 			port = server.port,
 			udpToken = udp_token,
 			runtimeID = state.runtimeID,
 			syncGeneration = state.syncGeneration,
+			manifestHash = state.manifestHash,
 			bindState = client.bound and "bound" or "pending",
 		})
 
@@ -1393,7 +1398,9 @@ local function handleFrame(state, connection, frame)
 				persistentMode = state.persistentMode,
 				runtimeID = state.runtimeID,
 				syncGeneration = state.syncGeneration,
+				manifestHash = state.manifestHash,
 			})
+			client.sync_state = "syncing"
 		return
 	end
 
@@ -1425,6 +1432,33 @@ local function handleFrame(state, connection, frame)
 			return
 		end
 
+	if frameType == "SYNC_READY" then
+		local client = state.clients[connection]
+		local generation = math.floor(tonumber(payload.syncGeneration) or 0)
+		local runtimeID = tostring(payload.runtimeID or "")
+		local manifestHash = tostring(payload.manifestHash or "")
+		if client and client.hello
+			and generation == state.syncGeneration
+			and runtimeID == tostring(state.runtimeID)
+			and manifestHash ~= ""
+			and manifestHash == state.manifestHash then
+			client.sync_state = "ready"
+			client.ready_generation = generation
+			client.ready_manifest_hash = manifestHash
+			enqueueFrame(state, connection, "SYNC_READY_ACK", {
+				runtimeID = state.runtimeID,
+				syncGeneration = state.syncGeneration,
+				manifestHash = state.manifestHash,
+			})
+		else
+			enqueueFrame(state, connection, "ERROR_REPORT", {
+				code = "SRC_STALE_MANIFEST",
+				error = "SYNC_READY does not match the active server manifest",
+			})
+		end
+		return
+	end
+
 	if frameType == "EVENT" then
 		logLegacyTcpEventFrame(frameType)
 		return
@@ -1442,7 +1476,7 @@ local function handleFrame(state, connection, frame)
 
 	if frameType == "EVENTS_UDP_READY" then
 		local client = state.clients[connection]
-		if client and client.hello and client.bound then
+		if client and client.hello and client.bound and client.sync_state == "ready" then
 			client.udpEventsReady = true
 			if state.sync_world_mutations then
 				state.sync_world_mutations(client.player)
@@ -1626,6 +1660,9 @@ local function acceptConnections(state)
 			earlyResults = {},
 			recentCompleted = {},
 			closeAfterFlush = false,
+			sync_state = "connected",
+			ready_generation = 0,
+			ready_manifest_hash = nil,
 		}
 		udpEvents.resetClient(state.clients[connOrErr])
 
@@ -2203,6 +2240,7 @@ function M.refresh(state)
 			enqueueFrame(state, connection, "REFRESH_NOTICE", {
 				runtimeID = state.runtimeID,
 				syncGeneration = generation,
+				manifestHash = state.manifestHash,
 			})
 		end
 	end
@@ -2278,11 +2316,12 @@ function M.on_udp_datagram(state, decoded)
 	end
 end
 
-function M.onPostPacketReceive(state)
-	local decoded = udpEvents.onPostPacketReceive(state)
-	if decoded then
-		M.on_udp_datagram(state, decoded)
+function M.onPacketReceive(state)
+	local decoded, should_override = udpEvents.onPacketReceive(state)
+	for _, datagram in ipairs(decoded) do
+		M.on_udp_datagram(state, datagram)
 	end
+	return should_override
 end
 
 function M.shutdown(state)
@@ -2300,6 +2339,37 @@ function M.getConnectionPlayer(state, connection)
 	end
 
 	return client.player or refreshClientPlayerBinding(state, connection, client)
+end
+
+function M.authorizeAccountTicket(state, account, endpoint)
+	if not state or not account or type(endpoint) ~= "table" then
+		return false
+	end
+
+	local address = tostring(endpoint.address or "")
+	local phoneNumber = parsePositiveInteger(account.phoneNumber)
+	if address == "" or not phoneNumber then
+		return false
+	end
+
+	for connection, client in pairs(state.clients) do
+		local claimedPhone = client and client.helloPayload
+			and parsePositiveInteger(client.helloPayload.phoneNumber or client.helloPayload.phone)
+		if connection.isOpen
+			and tostring(connection.address) == address
+			and claimedPhone == phoneNumber
+			and client.sync_state == "ready"
+			and client.ready_generation == state.syncGeneration
+			and client.ready_manifest_hash == state.manifestHash
+			and tostring(client.game_address) == address
+			and tonumber(client.game_port) == tonumber(endpoint.port) then
+			client.admitted_address = address
+			client.admitted_port = tonumber(endpoint.port)
+			return true
+		end
+	end
+
+	return false
 end
 
 return M

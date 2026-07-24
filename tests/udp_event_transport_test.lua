@@ -1,10 +1,15 @@
 local test_dir = debug.getinfo(1, "S").source:sub(2):match("(.*/)")
 package.path = test_dir .. "../?.lua;" .. package.path
 
-bit32 = {
-	band = function(left, right) return left & right end,
-	bxor = function(left, right) return left ~ right end,
-}
+local has_bit, bit = pcall(require, "bit")
+if has_bit then
+	bit32 = { band = bit.band, bxor = bit.bxor }
+else
+	bit32 = {
+		band = assert(load("return function(left, right) return left & right end"))(),
+		bxor = assert(load("return function(left, right) return left ~ right end"))(),
+	}
+end
 
 package.preload["main.src.log"] = function()
 	return { info = function() end, warn = function() end }
@@ -12,37 +17,17 @@ end
 
 server = { port = 26950 }
 local sent = {}
-local base_address = 0x1000
-local packet_read_address = base_address + 0x39085C84
-local packet_read_port = base_address + 0x39085C88
-local recv_packet_size = base_address + 0x39085C98
-local recv_packet = base_address + 0x39085CA4
-local ints = {}
-local received_bytes = ""
-memory = {
-	getBaseAddress = function() return base_address end,
-	readInt = function(address) return ints[address] end,
-	writeInt = function(address, value)
-		ints[address] = value
-	end,
-	readBytes = function(address, size)
-		if address == recv_packet then
-			return received_bytes:sub(1, size)
-		end
-	end,
-	writeBytes = function(address, value)
-		if address == recv_packet then
-			received_bytes = value
-		end
-	end,
-}
+local drained = { packets = {}, drained = 0, vanillaPending = false }
 srcIntegrationNative = {
 	randomToken = function()
-		return "0123456789abcdef"
+		return "0123456789abcdef0123456789abcdef"
 	end,
 	sendPacket = function(address, port, data)
 		sent[#sent + 1] = { address = address, port = port, data = data }
 		return #data
+	end,
+	drainSrcPackets = function()
+		return drained
 	end,
 }
 
@@ -50,7 +35,7 @@ local udp_events = require("main.src.udpEvents")
 local connection = { isOpen = true, address = "127.0.0.1" }
 local client = {
 	udpEventsReady = true,
-	udp_token = "0123456789abcdef",
+	udp_token = "0123456789abcdef0123456789abcdef",
 	player = {
 		connection = {
 			address = "127.0.0.1",
@@ -70,14 +55,23 @@ assert(sent[1].data:sub(1, 8) == "7DFPSRCU")
 assert(#sent[1].data <= 1200)
 assert(#client.udpSendQueue == 0)
 
-received_bytes = sent[1].data
-ints[packet_read_address] = 0x7F000001
-ints[packet_read_port] = 26950
-ints[recv_packet_size] = #received_bytes
-local decoded = udp_events.onPostPacketReceive(state)
-assert(decoded.connection == connection)
-assert(decoded.messages[1].msgId == 1)
-assert(ints[recv_packet_size] == 0)
+drained = {
+	packets = {
+		{ address = "127.0.0.1", port = 26950, data = sent[1].data },
+	},
+	drained = 1,
+	vanillaPending = false,
+}
+local decoded, should_override = udp_events.onPacketReceive(state)
+assert(#decoded == 1)
+assert(decoded[1].connection == connection)
+assert(decoded[1].messages[1].msgId == 1)
+assert(should_override == true)
+
+drained = { packets = {}, drained = 0, vanillaPending = true }
+decoded, should_override = udp_events.onPacketReceive(state)
+assert(#decoded == 0)
+assert(should_override == false)
 
 package.loaded["main.src.network"] = nil
 package.loaded["main.src.udpEvents"] = nil
@@ -135,7 +129,27 @@ state = {
 	eventHandlersByHash = {},
 	eventHashesByName = {},
 	tick = 1,
+	syncGeneration = 7,
+	manifestHash = string.rep("a", 64),
 }
+client.helloPayload = { phoneNumber = 1234 }
+client.sync_state = "ready"
+client.ready_generation = state.syncGeneration
+client.ready_manifest_hash = state.manifestHash
+client.game_address = "127.0.0.1"
+client.game_port = 26950
+assert(network.authorizeAccountTicket(
+	state,
+	{ phoneNumber = 1234 },
+	{ address = "127.0.0.1", port = 26950 }
+))
+client.ready_generation = state.syncGeneration - 1
+assert(not network.authorizeAccountTicket(
+	state,
+	{ phoneNumber = 1234 },
+	{ address = "127.0.0.1", port = 26950 }
+))
+client.ready_generation = state.syncGeneration
 assert(network.onClientEvent(state, "test", function() handled = handled + 1 end))
 
 local datagram = { connection = connection, client = client, messages = { received } }
