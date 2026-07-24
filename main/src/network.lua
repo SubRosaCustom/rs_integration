@@ -4,9 +4,11 @@ local log = require("main.src.log")
 local shared = require("main.src.shared")
 local eventCodec = require("main.src.eventCodec")
 local udpEvents = require("main.src.udpEvents")
+local threaded_tcp_server = require("main.src.threaded_tcp_server")
 
 local M = {}
 local BINARY_MAGIC = "SRCB"
+local HEARTBEAT_TIMEOUT_SECONDS = 60
 local SERVER_EVENT_ID_MIN = 0x80000000
 local SERVER_EVENT_ID_MAX = 0xFFFFFFFF
 local MAX_EVENT_LOG_DETAIL_BYTES = 512
@@ -21,6 +23,7 @@ local VALID_CLIENT_EVENT_STATUSES = {
 }
 local disconnectOtherConnectionsForPlayer
 local loggedLegacyTcpEventFrame = false
+local next_tcp_bind_tick = 0
 local unpackFn = table.unpack or unpack
 
 local function parsePositiveInteger(value)
@@ -265,11 +268,8 @@ local function closeClientTransfer(client)
 	end
 end
 
-local function resetClientSyncState(client)
-	if not client then
-		return
-	end
-
+local function resetClientSyncState(connection, client)
+	connection:discard_pending_sends()
 	closeClientTransfer(client)
 	client.pendingFileRequests = {}
 	client.pendingBundleRequests = {}
@@ -286,12 +286,8 @@ local function resetClientSyncState(client)
 	udpEvents.resetClient(client)
 end
 
-local function clearClientBinding(client)
-	if not client then
-		return
-	end
-
-	resetClientSyncState(client)
+local function clearClientBinding(connection, client)
+	resetClientSyncState(connection, client)
 	client.player = nil
 	client.bound = false
 end
@@ -303,12 +299,12 @@ local function validateBoundPlayer(connection, client)
 
 	local player = client.player
 	if player.isBot or not player.connection then
-		clearClientBinding(client)
+		clearClientBinding(connection, client)
 		return nil
 	end
 
 	if tostring(player.connection.address) ~= tostring(connection.address) then
-		clearClientBinding(client)
+		clearClientBinding(connection, client)
 		return nil
 	end
 
@@ -317,11 +313,11 @@ local function validateBoundPlayer(connection, client)
 		local subRosaID =
 			parsePositiveInteger(client.helloPayload.subRosaID or client.helloPayload.subrosaID or client.helloPayload.subrosa_id)
 		if phoneNumber and tonumber(player.phoneNumber) ~= phoneNumber then
-			clearClientBinding(client)
+			clearClientBinding(connection, client)
 			return nil
 		end
 		if subRosaID and tonumber(player.subRosaID) ~= subRosaID then
-			clearClientBinding(client)
+			clearClientBinding(connection, client)
 			return nil
 		end
 	end
@@ -395,7 +391,7 @@ disconnectOtherConnectionsForPlayer = function(state, player, exceptConnection)
 
 	for connection, client in pairs(state.clients) do
 		if connection ~= exceptConnection and client and client.player == player then
-			resetClientSyncState(client)
+			resetClientSyncState(connection, client)
 			client.closeAfterFlush = true
 		end
 	end
@@ -460,7 +456,7 @@ local function flushSendQueue(state, connection)
 		return
 	end
 
-	local sendBudget = math.max(1024, tonumber(state.config.maxSendBytesPerTick) or 262144)
+	local sendBudget = math.max(1024, state.config.maxSendBytesPerTick)
 	local sentThisTick = 0
 	while #client.sendQueue > 0 and sentThisTick < sendBudget do
 		local current = client.sendQueue[1]
@@ -489,7 +485,8 @@ local function flushSendQueue(state, connection)
 		end
 	end
 
-	if client.closeAfterFlush and #client.sendQueue == 0 and connection.isOpen then
+	if client.closeAfterFlush and #client.sendQueue == 0 and
+		connection.pending_send_bytes == 0 and not connection.stream_active and connection.isOpen then
 		connection:close()
 	end
 end
@@ -613,11 +610,19 @@ local function startNextBundleTransfer(state, connection, client)
 		return false
 	end
 
-	client.activeBundleTransfer = {
-		id = bundleID,
-		data = bundle.archive,
-		offset = 1,
-	}
+	local endFrame = json.encode({ type = "BUNDLE_END", payload = { id = bundleID } }) .. "\n"
+	local started = connection:start_bundle(
+		bundleID,
+		bundle.archiveSha256,
+		bundle.archive,
+		endFrame
+	)
+	if not started then
+		table.insert(client.pendingBundleRequests, 1, bundleID)
+		return false
+	end
+
+	client.activeBundleTransfer = { id = bundleID }
 	return true
 end
 
@@ -627,9 +632,9 @@ local function pumpFileTransfer(state, connection)
 		return
 	end
 
-	local chunkSize = math.max(256, tonumber(state.config.fileChunkSize) or 12000)
-	local chunkBudget = math.max(1, tonumber(state.config.maxFileChunksPerTick) or 8)
-	local maxQueuedSendFrames = math.max(8, tonumber(state.config.maxQueuedSendFrames) or 256)
+	local chunkSize = math.max(256, state.config.fileChunkSize)
+	local chunkBudget = math.max(1, state.config.maxFileChunksPerTick)
+	local maxQueuedSendFrames = math.max(8, state.config.maxQueuedSendFrames)
 
 	local sentChunks = 0
 	while sentChunks < chunkBudget do
@@ -688,44 +693,11 @@ local function pumpBundleTransfer(state, connection)
 		return
 	end
 
-	local chunkSize = math.max(256, tonumber(state.config.fileChunkSize) or 12000)
-	local chunkBudget = math.max(1, tonumber(state.config.maxFileChunksPerTick) or 8)
-	local maxQueuedSendFrames = math.max(8, tonumber(state.config.maxQueuedSendFrames) or 256)
-
-	local sentChunks = 0
-	while sentChunks < chunkBudget do
-		if #client.sendQueue >= maxQueuedSendFrames then
-			return
-		end
-
-		if not client.activeBundleTransfer and not startNextBundleTransfer(state, connection, client) then
-			return
-		end
-
-		local transfer = client.activeBundleTransfer
-		if not transfer then
-			return
-		end
-
-		local chunk = transfer.data:sub(transfer.offset, transfer.offset + chunkSize - 1)
-		if chunk ~= "" then
-			local binaryFrame = encodeBinaryFrame(
-				"BUNDLE_CHUNK",
-				string.pack(">I2", #transfer.id) .. transfer.id .. chunk
-			)
-			if not binaryFrame or not enqueueBytes(state, connection, binaryFrame) then
-				return
-			end
-			transfer.offset = transfer.offset + #chunk
-			sentChunks = sentChunks + 1
-		else
-			client.activeBundleTransfer = nil
-			if not enqueueFrame(state, connection, "BUNDLE_END", {
-				id = transfer.id,
-			}) then
-				return
-			end
-		end
+	if client.activeBundleTransfer and not connection.stream_active then
+		client.activeBundleTransfer = nil
+	end
+	if not client.activeBundleTransfer then
+		startNextBundleTransfer(state, connection, client)
 	end
 end
 
@@ -1314,6 +1286,10 @@ local function handleFrame(state, connection, frame)
 	end
 
 	if frameType == "SRC_PING" then
+		local client = state.clients[connection]
+		if client then
+			client.last_heartbeat_at = os.realClock()
+		end
 		enqueueFrame(state, connection, "SRC_PONG", {
 			protocol = 5,
 		})
@@ -1327,7 +1303,7 @@ local function handleFrame(state, connection, frame)
 			return
 		end
 
-		resetClientSyncState(client)
+		resetClientSyncState(connection, client)
 		udp_token = udpEvents.new_token()
 		if not udp_token then
 			log.warn("SRC handshake rejected: UDP token generation is unavailable")
@@ -1349,7 +1325,7 @@ local function handleFrame(state, connection, frame)
 			applyBoundPlayer(state, connection, client, player)
 		elseif bindErr == "invalid_hello_payload" or bindErr == "ambiguous_bind_claims" then
 			log.warn("SRC bind rejected (%s): %s", shared.clientId(connection), tostring(bindErr))
-			clearClientBinding(client)
+			clearClientBinding(connection, client)
 			client.hello = false
 			enqueueFrame(state, connection, "ERROR_REPORT", {
 				code = "SRC_BIND_REJECTED",
@@ -1418,7 +1394,7 @@ local function handleFrame(state, connection, frame)
 			return
 		end
 
-		if frameType == "BUNDLE_REQ" then
+	if frameType == "BUNDLE_REQ" then
 			local client = state.clients[connection]
 			if not client or not client.hello then
 				enqueueFrame(state, connection, "ERROR_REPORT", {
@@ -1431,6 +1407,11 @@ local function handleFrame(state, connection, frame)
 			queueSyncBundle(state, connection, payload.id)
 			return
 		end
+
+	if frameType == "EVENT" then
+		logLegacyTcpEventFrame(frameType)
+		return
+	end
 
 	if frameType == "SYNC_READY" then
 		local client = state.clients[connection]
@@ -1456,11 +1437,6 @@ local function handleFrame(state, connection, frame)
 				error = "SYNC_READY does not match the active server manifest",
 			})
 		end
-		return
-	end
-
-	if frameType == "EVENT" then
-		logLegacyTcpEventFrame(frameType)
 		return
 	end
 
@@ -1523,7 +1499,7 @@ local function processClientReads(state, connection)
 	end
 
 	local readSize = state.config.readSize
-	local maxReadBytesPerTick = math.max(readSize, tonumber(state.config.maxReadBytesPerTick) or 262144)
+	local maxReadBytesPerTick = math.max(readSize, state.config.maxReadBytesPerTick)
 	local maxFramesPerTick = 256
 	local readBytesThisTick = 0
 	local framesThisTick = processBufferedFrames(state, connection, client, maxFramesPerTick)
@@ -1626,30 +1602,64 @@ local function processPendingRetries(state, connection)
 end
 
 local function acceptConnections(state)
-	if not state.tcpServer or not state.tcpServer.isOpen then
+	if not state.tcpServer then
+		return
+	end
+
+	state.tcpServer:poll()
+	for connection, client in pairs(state.clients) do
+		local stats = connection:take_send_stats()
+		if stats then
+			if stats.bytes > 0 then
+				client.last_heartbeat_at = os.realClock()
+			end
+			local bytes_per_second = stats.bytes * 1000 / stats.elapsed_ms
+			log.info(
+				"TCP send raw client=%s rate=%.2f MiB/s bytes=%d calls=%d blocked=%d partial=%d",
+				shared.clientId(connection),
+				bytes_per_second / (1024 * 1024),
+				stats.bytes,
+				stats.calls,
+				stats.blocked,
+				stats.partial
+			)
+		end
+	end
+	if state.tcpServer.last_error then
+		log.warn("TCP worker failed: %s", state.tcpServer.last_error)
+		state.tcpServer:close()
+		state.tcpServer = nil
+		state.tcpBindInProgress = false
+		state.boundPort = nil
+		next_tcp_bind_tick = state.tick + 60
+		return
+	end
+
+	if state.tcpBindInProgress and state.tcpServer.isListening then
+		state.tcpBindInProgress = false
+		state.boundPort = state.tcpServer.port
+		log.info("TCP worker listening on server port %s", state.boundPort)
+	end
+
+	if not state.tcpServer.isOpen then
 		return
 	end
 
 	while true do
-		local ok, connOrErr = pcall(state.tcpServer.accept, state.tcpServer)
-		if not ok then
-			log.warn("accept failed: %s", connOrErr)
+		local connection = state.tcpServer:accept()
+		if connection == nil then
 			break
 		end
 
-		if connOrErr == nil then
-			break
-		end
-
-			state.clients[connOrErr] = {
-				recvBuffer = "",
-				sendQueue = {},
-				sendOffset = 1,
-				pendingFileRequests = {},
-				pendingBundleRequests = {},
-				activeFileTransfer = nil,
-				activeBundleTransfer = nil,
-				hello = false,
+		state.clients[connection] = {
+			recvBuffer = "",
+			sendQueue = {},
+			sendOffset = 1,
+			pendingFileRequests = {},
+			pendingBundleRequests = {},
+			activeFileTransfer = nil,
+			activeBundleTransfer = nil,
+			hello = false,
 			helloPayload = nil,
 			player = nil,
 			bound = false,
@@ -1660,13 +1670,14 @@ local function acceptConnections(state)
 			earlyResults = {},
 			recentCompleted = {},
 			closeAfterFlush = false,
+			last_heartbeat_at = os.realClock(),
 			sync_state = "connected",
 			ready_generation = 0,
 			ready_manifest_hash = nil,
 		}
-		udpEvents.resetClient(state.clients[connOrErr])
+		udpEvents.resetClient(state.clients[connection])
 
-		log.info("TCP client connected: %s", shared.clientId(connOrErr))
+		log.info("TCP client connected: %s", shared.clientId(connection))
 	end
 end
 
@@ -1690,10 +1701,16 @@ local function processClients(state)
 
 		if connection.isOpen then
 			processClientReads(state, connection)
-			processPendingRetries(state, connection)
-			pumpBundleTransfer(state, connection)
-			pumpFileTransfer(state, connection)
-			flushSendQueue(state, connection)
+			client.last_heartbeat_at = client.last_heartbeat_at or os.realClock()
+			if os.realClock() - client.last_heartbeat_at >= HEARTBEAT_TIMEOUT_SECONDS then
+				log.warn("SRC heartbeat timed out: %s", shared.clientId(connection))
+				connection:close()
+			else
+				processPendingRetries(state, connection)
+				pumpBundleTransfer(state, connection)
+				pumpFileTransfer(state, connection)
+				flushSendQueue(state, connection)
+			end
 		end
 
 		if not connection.isOpen then
@@ -1711,42 +1728,38 @@ local function closeAll(state)
 	end
 	state.clients = {}
 
-	if state.tcpServer and state.tcpServer.isOpen then
+	if state.tcpServer then
 		pcall(state.tcpServer.close, state.tcpServer)
 	end
 	state.tcpServer = nil
+	state.tcpBindInProgress = false
 	state.boundPort = nil
 end
 
 local function ensureTcpServer(state)
-	if state.tcpBindInProgress then
-		return
-	end
-
 	local desiredPort = tonumber(server.port) or 0
-	if desiredPort <= 0 then
+	if desiredPort <= 0 or state.tick < next_tcp_bind_tick then
 		return
 	end
 
-	if state.tcpServer and state.tcpServer.isOpen and state.boundPort == desiredPort then
+	if state.tcpServer and state.tcpServer.isOpen and state.tcpServer.port == desiredPort then
 		return
 	end
 
-	if state.tcpServer and state.tcpServer.isOpen then
+	if state.tcpServer then
 		closeAll(state)
 	end
 
 	state.tcpBindInProgress = true
-	local ok, serverOrErr = pcall(TCPServer.new, desiredPort)
-	state.tcpBindInProgress = false
+	local ok, serverOrErr = pcall(threaded_tcp_server.new, desiredPort)
 	if not ok then
+		state.tcpBindInProgress = false
+		next_tcp_bind_tick = state.tick + 60
 		log.warn("failed to bind TCP server on %s: %s", desiredPort, serverOrErr)
 		return
 	end
 
 	state.tcpServer = serverOrErr
-	state.boundPort = desiredPort
-	log.info("TCP listening on server port %s", desiredPort)
 end
 
 function M.onClientEvent(state, name, fn)
@@ -2235,7 +2248,7 @@ function M.refresh(state)
 	local generation = nextSyncGeneration(state)
 	for connection, client in pairs(state.clients) do
 		if connection.isOpen and client.hello then
-			resetClientSyncState(client)
+			resetClientSyncState(connection, client)
 			client.generation = generation
 			enqueueFrame(state, connection, "REFRESH_NOTICE", {
 				runtimeID = state.runtimeID,
@@ -2244,20 +2257,6 @@ function M.refresh(state)
 			})
 		end
 	end
-end
-
-function M.ensureTcpServer(state)
-	ensureTcpServer(state)
-end
-
-function M.logicStep(state)
-	ensureTcpServer(state)
-	acceptConnections(state)
-	processClients(state)
-end
-
-function M.onSendPacket(state, address, port)
-	udpEvents.onSendPacket(state, address, port)
 end
 
 function M.on_udp_datagram(state, decoded)
@@ -2314,6 +2313,20 @@ function M.on_udp_datagram(state, decoded)
 			handleReliableEventResultPayload(state, connection, message)
 		end
 	end
+end
+
+function M.ensureTcpServer(state)
+	ensureTcpServer(state)
+end
+
+function M.logicStep(state)
+	ensureTcpServer(state)
+	acceptConnections(state)
+	processClients(state)
+end
+
+function M.onSendPacket(state, address, port)
+	udpEvents.onSendPacket(state, address, port)
 end
 
 function M.onPacketReceive(state)
