@@ -3,25 +3,25 @@ local eventCodec = require("main.src.eventCodec")
 
 local M = {}
 
-local PACKET_SIZE_ADDRESS = 0x39075C7C
-local PACKET_BIT_OFFSET_ADDRESS = 0x39075C80
-local PACKET_ADDRESS = 0x39075C84
 local PACKET_READ_ADDRESS_ADDRESS = 0x39085C84
 local PACKET_READ_PORT_ADDRESS = 0x39085C88
 local RECV_PACKET_SIZE_ADDRESS = 0x39085C98
-local RECV_PACKET_ADDRESS = 0x39085CA4 -- inferred from recvPacketSize + 0x0C, matches client layout
-
-local MAX_PACKET_SIZE = 0x10000
-local TRAILER_SIZE = 8
-local MAX_RAW_MESSAGE_SIZE = MAX_PACKET_SIZE - TRAILER_SIZE - 8
-local MAGIC = "SRCE"
+local RECV_PACKET_ADDRESS = 0x39085CA4
+local MAX_DATAGRAM_SIZE = 1200
+local DATAGRAM_HEADER_SIZE = 28
+local MAX_BATCH_SIZE = MAX_DATAGRAM_SIZE - DATAGRAM_HEADER_SIZE
+local MAX_RAW_MESSAGE_SIZE = MAX_BATCH_SIZE - 8
+local GAME_MAGIC = "7DFP"
+local MAGIC = "SRCU"
+local DATAGRAM_VERSION = 1
 local BATCH_VERSION = 1
+local EMPTY_BATCH = string.pack(">BBI2", BATCH_VERSION, 0, 0)
 
 local KIND_RELIABLE_EVENT = 1
 local KIND_RELIABLE_ACK_BATCH = 2
 local KIND_RELIABLE_RESULT = 3
 
-local function getBaseAddress()
+local function get_base_address()
 	local ok, value = pcall(memory.getBaseAddress)
 	if not ok or type(value) ~= "number" or value == 0 then
 		return nil
@@ -29,54 +29,44 @@ local function getBaseAddress()
 	return math.floor(value)
 end
 
-local function resolveAddress(offset)
-	local baseAddress = getBaseAddress()
-	if not baseAddress then
+local function read_int(offset)
+	local base_address = get_base_address()
+	if not base_address then
 		return nil
 	end
-	return baseAddress + offset
-end
-
-local function readInt(offset)
-	local address = resolveAddress(offset)
-	if not address then
-		return nil
-	end
-	local ok, value = pcall(memory.readInt, address)
+	local ok, value = pcall(memory.readInt, base_address + offset)
 	if not ok or type(value) ~= "number" then
 		return nil
 	end
 	return math.floor(value)
 end
 
-local function writeInt(offset, value)
-	local address = resolveAddress(offset)
-	if not address then
+local function write_int(offset, value)
+	local base_address = get_base_address()
+	if not base_address then
 		return false
 	end
-	local ok = pcall(memory.writeInt, address, math.floor(value))
-	return ok
+	return pcall(memory.writeInt, base_address + offset, math.floor(value))
 end
 
-local function readBytes(offset, size)
-	local address = resolveAddress(offset)
-	if not address then
+local function read_bytes(offset, size)
+	local base_address = get_base_address()
+	if not base_address then
 		return nil
 	end
-	local ok, value = pcall(memory.readBytes, address, size)
+	local ok, value = pcall(memory.readBytes, base_address + offset, size)
 	if not ok or type(value) ~= "string" then
 		return nil
 	end
 	return value
 end
 
-local function writeBytes(offset, value)
-	local address = resolveAddress(offset)
-	if not address then
+local function write_bytes(offset, value)
+	local base_address = get_base_address()
+	if not base_address then
 		return false
 	end
-	local ok = pcall(memory.writeBytes, address, value)
-	return ok
+	return pcall(memory.writeBytes, base_address + offset, value)
 end
 
 local function normalizePort(port)
@@ -91,7 +81,7 @@ local function normalizePort(port)
 	return numberPort
 end
 
-local function ipv4FromInteger(value)
+local function ipv4_from_integer(value)
 	if type(value) ~= "number" then
 		return nil
 	end
@@ -109,6 +99,37 @@ local function ipv4FromInteger(value)
 	unsigned = math.floor(unsigned / 256)
 	local a = unsigned % 256
 	return string.format("%d.%d.%d.%d", a, b, c, d)
+end
+
+local function build_datagram(token, batch)
+	if type(token) ~= "string" or #token ~= 16 then
+		return nil, "invalid UDP token"
+	end
+	if type(batch) ~= "string" or #batch < 4 or #batch > MAX_BATCH_SIZE then
+		return nil, "UDP batch size out of range"
+	end
+
+	return string.pack(">c4c4BBc16I2", GAME_MAGIC, MAGIC, DATAGRAM_VERSION, 0, token, #batch) .. batch
+end
+
+local function parse_datagram(raw)
+	if type(raw) ~= "string" or #raw < DATAGRAM_HEADER_SIZE or #raw > MAX_DATAGRAM_SIZE then
+		return nil, nil, "UDP datagram size out of range"
+	end
+
+	local game_magic, magic, version, flags, token, batch_size, next_pos =
+		string.unpack(">c4c4BBc16I2", raw)
+	if game_magic ~= GAME_MAGIC or magic ~= MAGIC then
+		return nil
+	end
+	if version ~= DATAGRAM_VERSION or flags ~= 0 then
+		return nil, nil, "unsupported UDP datagram header"
+	end
+	if batch_size ~= #raw - DATAGRAM_HEADER_SIZE then
+		return nil, nil, "UDP datagram payload size mismatch"
+	end
+
+	return token, raw:sub(next_pos)
 end
 
 local function normalizeEventHash(value)
@@ -306,24 +327,6 @@ local function decodeBatch(batch)
 	return messages
 end
 
-local function splitPacket(raw)
-	if type(raw) ~= "string" or #raw < TRAILER_SIZE then
-		return nil
-	end
-
-	if raw:sub(-4) ~= MAGIC then
-		return nil
-	end
-
-	local batchSize = string.unpack(">I4", raw:sub(-8, -5))
-	local vanillaSize = #raw - TRAILER_SIZE - batchSize
-	if batchSize < 0 or vanillaSize < 0 then
-		return nil, "invalid appended batch size"
-	end
-
-	return raw:sub(1, vanillaSize), raw:sub(vanillaSize + 1, #raw - TRAILER_SIZE)
-end
-
 local function getPendingAckWindow(client)
 	local order = client and client.udpPendingAckOrder
 	local startIndex = client and client.udpPendingAckStart or 1
@@ -391,7 +394,7 @@ local function buildAckBatchForPacket(client, maxBatchBytes)
 		return nil, 0
 	end
 
-	local maxCount = math.floor((maxBatchBytes - 8) / 4)
+	local maxCount = math.floor((maxBatchBytes - 12) / 4)
 	if maxCount <= 0 then
 		return nil, 0
 	end
@@ -410,8 +413,7 @@ function M.resetClient(client)
 	client.udpPendingAckSet = {}
 	client.udpPendingAckStart = 1
 	client.udpEventsReady = false
-	client.udpEndpointAddress = nil
-	client.udpEndpointPort = nil
+	client.udp_token = nil
 end
 
 function M.binary(bytes)
@@ -452,19 +454,26 @@ function M.queueAck(client, msgId)
 	return queueAck(client, msgId)
 end
 
-function M.findClientForEndpoint(state, address, port)
+function M.new_token()
+	local native = rawget(_G, "srcIntegrationNative")
+	if type(native) ~= "table" or type(native.randomToken) ~= "function" then
+		return nil
+	end
+
+	local ok, token = pcall(native.randomToken)
+	if not ok or type(token) ~= "string" or #token ~= 16 then
+		return nil
+	end
+	return token
+end
+
+local function find_client_for_game_endpoint(state, address, port)
 	if not state or type(state.clients) ~= "table" then
 		return nil, nil
 	end
 
 	local normalizedAddress = tostring(address)
 	local normalizedPort = normalizePort(port)
-	for connection, client in pairs(state.clients) do
-		if client and client.udpEndpointAddress == normalizedAddress and client.udpEndpointPort == normalizedPort then
-			return connection, client
-		end
-	end
-
 	for connection, client in pairs(state.clients) do
 		local player = client and client.player or nil
 		local playerConnection = player and player.connection or nil
@@ -478,31 +487,30 @@ function M.findClientForEndpoint(state, address, port)
 	return nil, nil
 end
 
+local function find_client_for_datagram(state, token, address)
+	if type(state) ~= "table" or type(state.clients) ~= "table" then
+		return nil, nil
+	end
+
+	for connection, client in pairs(state.clients) do
+		if client
+			and client.udp_token == token
+			and tostring(connection.address) == tostring(address) then
+			return connection, client
+		end
+	end
+	return nil, nil
+end
+
 function M.onSendPacket(state, address, port)
-	local _, client = M.findClientForEndpoint(state, address, port)
-	if not client or client.udpEventsReady ~= true then
+	local _, client = find_client_for_game_endpoint(state, address, port)
+	local native = rawget(_G, "srcIntegrationNative")
+	if not client or client.udpEventsReady ~= true or type(native) ~= "table"
+		or type(native.sendPacket) ~= "function" then
 		return
 	end
 
-	local packetSize = readInt(PACKET_SIZE_ADDRESS)
-	if type(packetSize) ~= "number" or packetSize <= 0 or packetSize >= MAX_PACKET_SIZE then
-		return
-	end
-	local packetBitOffset = readInt(PACKET_BIT_OFFSET_ADDRESS)
-	if type(packetBitOffset) ~= "number" or packetBitOffset < 0 then
-		packetBitOffset = 0
-	end
-	local alignedSize = packetSize + (packetBitOffset > 0 and 1 or 0)
-	if alignedSize >= MAX_PACKET_SIZE then
-		return
-	end
-
-	local maxBatchBytes = MAX_PACKET_SIZE - alignedSize - TRAILER_SIZE
-	if maxBatchBytes <= 8 then
-		return
-	end
-
-	local ackBytes, ackCount = buildAckBatchForPacket(client, maxBatchBytes)
+	local ackBytes, ackCount = buildAckBatchForPacket(client, MAX_BATCH_SIZE)
 	local queueToBatch
 	if type(ackBytes) == "string" and ackCount > 0 then
 		queueToBatch = { ackBytes }
@@ -517,106 +525,84 @@ function M.onSendPacket(state, address, port)
 		ackCount = 0
 	end
 
-	local batch, count = buildBatch(queueToBatch, maxBatchBytes)
+	local batch, count = buildBatch(queueToBatch, MAX_BATCH_SIZE)
 	if type(batch) ~= "string" or count <= 0 then
 		return
 	end
 
-	local trailer = batch .. string.pack(">I4", #batch) .. MAGIC
-	local originalTail = readBytes(PACKET_ADDRESS + alignedSize, #trailer)
-	if not originalTail or #originalTail ~= #trailer then
-		originalTail = string.rep("\0", #trailer)
-	end
-
-	if not writeBytes(PACKET_ADDRESS + alignedSize, trailer) then
-		return
-	end
-	if not writeInt(PACKET_SIZE_ADDRESS, alignedSize + #trailer) then
-		writeBytes(PACKET_ADDRESS + alignedSize, originalTail)
-		return
-	end
-	if packetBitOffset > 0 and not writeInt(PACKET_BIT_OFFSET_ADDRESS, 0) then
-		writeBytes(PACKET_ADDRESS + alignedSize, originalTail)
-		writeInt(PACKET_SIZE_ADDRESS, packetSize)
+	local datagram, encode_err = build_datagram(client.udp_token, batch)
+	if not datagram then
+		log.warn("failed to build standalone UDP datagram: %s", tostring(encode_err))
 		return
 	end
 
-	client.udpEndpointAddress = tostring(address)
-	client.udpEndpointPort = normalizePort(port)
-	state.udpSendMutationStack = state.udpSendMutationStack or {}
-	state.udpSendMutationStack[#state.udpSendMutationStack + 1] = {
-		client = client,
-		originalSize = packetSize,
-		originalBitOffset = packetBitOffset,
-		alignedSize = alignedSize,
-		originalTail = originalTail,
-		appendedSize = #trailer,
-		ackCount = ackCount,
-		eventCount = math.max(0, count - (ackCount > 0 and 1 or 0)),
-	}
-end
-
-function M.onPostSendPacket(state)
-	if not state or type(state.udpSendMutationStack) ~= "table" then
+	local ok, sent_or_err = pcall(native.sendPacket, tostring(address), normalizePort(port), datagram)
+	if not ok then
+		log.warn("standalone UDP send failed: %s", tostring(sent_or_err))
+		return
+	end
+	if sent_or_err ~= #datagram then
 		return
 	end
 
-	local mutation = table.remove(state.udpSendMutationStack)
-	if not mutation then
-		return
+	if ackCount > 0 then
+		consumeAckBatch(client, ackCount)
 	end
 
-	writeBytes(PACKET_ADDRESS + mutation.alignedSize, mutation.originalTail)
-	writeInt(PACKET_SIZE_ADDRESS, mutation.originalSize)
-	writeInt(PACKET_BIT_OFFSET_ADDRESS, mutation.originalBitOffset or 0)
-
-	local client = mutation.client
-	if client then
-		if mutation.ackCount and mutation.ackCount > 0 then
-			consumeAckBatch(client, mutation.ackCount)
-		end
-
-		if mutation.eventCount and mutation.eventCount > 0 and type(client.udpSendQueue) == "table" then
-			for _ = 1, mutation.eventCount do
-				table.remove(client.udpSendQueue, 1)
-			end
+	local event_count = math.max(0, count - (ackCount > 0 and 1 or 0))
+	if event_count > 0 and type(client.udpSendQueue) == "table" then
+		for _ = 1, event_count do
+			table.remove(client.udpSendQueue, 1)
 		end
 	end
 end
 
-function M.onPostPacketReceive()
-	local packetSize = readInt(RECV_PACKET_SIZE_ADDRESS)
-	if type(packetSize) ~= "number" or packetSize <= TRAILER_SIZE or packetSize > MAX_PACKET_SIZE then
+function M.onPostPacketReceive(state)
+	local packet_size = read_int(RECV_PACKET_SIZE_ADDRESS)
+	if type(packet_size) ~= "number" or packet_size < DATAGRAM_HEADER_SIZE
+		or packet_size > MAX_DATAGRAM_SIZE then
 		return nil
 	end
 
-	local raw = readBytes(RECV_PACKET_ADDRESS, packetSize)
-	if type(raw) ~= "string" or #raw ~= packetSize then
+	local raw = read_bytes(RECV_PACKET_ADDRESS, packet_size)
+	if type(raw) ~= "string" or #raw ~= packet_size
+		or raw:sub(1, 8) ~= GAME_MAGIC .. MAGIC then
 		return nil
 	end
 
-	local vanillaPacket, batchOrErr = splitPacket(raw)
-	if vanillaPacket == nil then
-		if batchOrErr then
-			log.warn("invalid inbound SRC UDP trailer: %s", tostring(batchOrErr))
-		end
+	write_bytes(RECV_PACKET_ADDRESS, string.rep("\0", packet_size))
+	write_int(RECV_PACKET_SIZE_ADDRESS, 0)
+
+	local token, batch, datagram_err = parse_datagram(raw)
+	if not token then
+		log.warn("invalid standalone UDP datagram: %s", tostring(datagram_err))
 		return nil
 	end
 
-	writeBytes(RECV_PACKET_ADDRESS + #vanillaPacket, string.rep("\0", packetSize - #vanillaPacket))
-	writeInt(RECV_PACKET_SIZE_ADDRESS, #vanillaPacket)
+	local address = ipv4_from_integer(read_int(PACKET_READ_ADDRESS_ADDRESS) or 0)
+	local port = normalizePort(read_int(PACKET_READ_PORT_ADDRESS))
+	local connection, client = find_client_for_datagram(state, token, address)
+	if not client or not port then
+		return nil
+	end
 
-	local messages, decodeErr = decodeBatch(batchOrErr)
+	local messages, decode_err = decodeBatch(batch)
 	if not messages then
-		log.warn("invalid inbound SRC UDP batch: %s", tostring(decodeErr))
-		messages = {}
+		log.warn("invalid inbound SRC UDP batch: %s", tostring(decode_err))
+		return nil
 	end
 
-	local address = ipv4FromInteger(readInt(PACKET_READ_ADDRESS_ADDRESS) or 0)
-	local port = normalizePort(readInt(PACKET_READ_PORT_ADDRESS))
+	if #messages == 0 then
+		local native = rawget(_G, "srcIntegrationNative")
+		local reply = build_datagram(token, EMPTY_BATCH)
+		if type(native) == "table" and type(native.sendPacket) == "function" then
+			pcall(native.sendPacket, address, port, reply)
+		end
+	end
+
 	return {
-		address = address,
-		port = port,
+		connection = connection,
+		client = client,
 		messages = messages,
 	}
 end

@@ -26,7 +26,8 @@ This repository is the server half of SRC. It is not the native client mod, and 
 
 ## Runtime Notes
 
-- SRC currently uses a TCP control/sync channel plus UDP batched event transport.
+- SRC uses TCP for control/sync and sends standalone batched event datagrams
+  through the game's existing UDP socket and port.
 - Server-owned reliable event IDs are allocated in the unsigned range `0x80000000` to `0xFFFFFFFF` to avoid client/server ID collisions.
 - `plugins/srcutils.lua` exposes `/srcwatch`, `/srcdisableplugin`, `/srcenableplugin`, and supports `srcwatch` as an alias.
 - Internal Lua helpers in this repo are now normalized to `snake_case`; API-facing names are preserved for compatibility with existing configs/plugins.

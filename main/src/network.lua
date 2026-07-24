@@ -1312,18 +1312,30 @@ local function handleFrame(state, connection, frame)
 
 	if frameType == "SRC_PING" then
 		enqueueFrame(state, connection, "SRC_PONG", {
-			protocol = 3,
+			protocol = 4,
 		})
 		return
 	end
 
 	if frameType == "HELLO" then
 		local client = state.clients[connection]
+		local udp_token
 		if not client then
 			return
 		end
 
 		resetClientSyncState(client)
+		udp_token = udpEvents.new_token()
+		if not udp_token then
+			log.warn("SRC handshake rejected: UDP token generation is unavailable")
+			enqueueFrame(state, connection, "ERROR_REPORT", {
+				code = "SRC_UDP_UNAVAILABLE",
+				error = "UDP token generation is unavailable",
+			})
+			client.closeAfterFlush = true
+			return
+		end
+		client.udp_token = udp_token
 		client.hello = true
 		client.helloPayload = payload
 		client.generation = state.syncGeneration
@@ -1347,8 +1359,9 @@ local function handleFrame(state, connection, frame)
 		end
 
 		enqueueFrame(state, connection, "HELLO_ACK", {
-			protocol = 3,
+			protocol = 4,
 			port = server.port,
+			udpToken = udp_token,
 			runtimeID = state.runtimeID,
 			syncGeneration = state.syncGeneration,
 			bindState = client.bound and "bound" or "pending",
@@ -2209,23 +2222,12 @@ function M.onSendPacket(state, address, port)
 	udpEvents.onSendPacket(state, address, port)
 end
 
-function M.onPostSendPacket(state)
-	udpEvents.onPostSendPacket(state)
-end
-
-function M.onPostPacketReceive(state)
-	local decoded = udpEvents.onPostPacketReceive()
-	if not decoded or type(decoded.messages) ~= "table" then
+function M.on_udp_datagram(state, decoded)
+	local connection = decoded and decoded.connection or nil
+	local client = decoded and decoded.client or nil
+	if not connection or not client or type(decoded.messages) ~= "table" then
 		return
 	end
-
-	local connection, client = udpEvents.findClientForEndpoint(state, decoded.address, decoded.port)
-	if not client then
-		return
-	end
-
-	client.udpEndpointAddress = decoded.address
-	client.udpEndpointPort = decoded.port
 
 	for _, message in ipairs(decoded.messages) do
 		if message.kind == 1 then
@@ -2273,6 +2275,13 @@ function M.onPostPacketReceive(state)
 		elseif message.kind == 3 then
 			handleReliableEventResultPayload(state, connection, message)
 		end
+	end
+end
+
+function M.onPostPacketReceive(state)
+	local decoded = udpEvents.onPostPacketReceive(state)
+	if decoded then
+		M.on_udp_datagram(state, decoded)
 	end
 end
 

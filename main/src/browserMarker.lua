@@ -5,7 +5,7 @@ local PACKET_BIT_OFFSET_ADDRESS = 0x39075C80
 local PACKET_ADDRESS = 0x39075C84
 local MAX_PACKET_SIZE = 0x10000
 local MARKER = "SRCE"
-local PROTOCOL_VERSION = 3
+local PROTOCOL_VERSION = 4
 
 local function getBaseAddress()
 	local ok, value = pcall(memory.getBaseAddress)

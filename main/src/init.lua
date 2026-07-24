@@ -233,7 +233,6 @@ if not state.hooksRegistered then
 	end)
 
 	hook.add("PostSendPacket", "main.src.udpPostSendPacket", function()
-		network.onPostSendPacket(state)
 		browserMarker.onPostSendPacket(state)
 	end)
 
