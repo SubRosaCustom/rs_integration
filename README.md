@@ -45,7 +45,7 @@ This repository is the server half of SRC. It is not the native client mod, and 
 
 ## Testing
 
-Run `cd test && ./test`. The suite boots the real RosaServer runtime and pulls
+Run `cd test && ./test`. The suite boots into a RosaServer runtime and pulls
 the pinned `rs_utils` release declared in `test/test`.
 
 ## Configuration
