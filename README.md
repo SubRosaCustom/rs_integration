@@ -1,5 +1,6 @@
-# Sub Rosa: Custom RosaServer Integration
 [![Test](https://github.com/SubRosaCustom/rs_integration/actions/workflows/test.yml/badge.svg)](https://github.com/SubRosaCustom/rs_integration/actions/workflows/test.yml)
+
+# Sub Rosa: Custom RosaServer Integration
 
 `rs_integration` is the server-side integration layer for SRC on RosaServer.
 
