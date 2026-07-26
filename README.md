@@ -43,6 +43,11 @@ This repository is the server half of SRC. It is not the native client mod, and 
 - `plugins/srcutils.lua` owns `/srcrefresh`, `/srcstatus`, `/srcclients`, `/srcwatch`, `/srcdisableplugin`, `/srcenableplugin`, `/srcdumpstate`, and `/srckicknonsrc`
 - `plugins/srccShowcase.lua` is an example server plugin
 
+## Testing
+
+Run `cd test && ./test`. The suite boots the real RosaServer runtime and pulls
+the pinned `rs_utils` release declared in `test/test`.
+
 ## Configuration
 
 This module is configured through `config.src` in the server's Lua config.

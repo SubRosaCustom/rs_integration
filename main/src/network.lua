@@ -3,6 +3,7 @@ local json = require("main.json")
 local log = require("main.src.log")
 local shared = require("main.src.shared")
 local eventCodec = require("main.src.eventCodec")
+local protocol = require("main.src.protocol")
 local udpEvents = require("main.src.udpEvents")
 local threaded_tcp_server = require("main.src.threaded_tcp_server")
 
@@ -192,7 +193,8 @@ local function getPlayerConnection(state, player)
 		end
 
 		for connection, client in pairs(state.clients) do
-			if client and connection and client.player == player then
+			if client and connection and connection.isOpen and client.player == player
+				and player.connection then
 				return connection
 			end
 		end
@@ -268,22 +270,26 @@ local function closeClientTransfer(client)
 	end
 end
 
-local function resetClientSyncState(connection, client)
+local function resetClientSyncState(connection, client, preserve_udp_state)
 	connection:discard_pending_sends()
 	closeClientTransfer(client)
 	client.pendingFileRequests = {}
 	client.pendingBundleRequests = {}
-	client.pendingEvents = {}
-	client.pendingResults = {}
-	client.awaitingResults = {}
-	client.earlyResults = {}
-	client.recentCompleted = {}
 	client.sendQueue = {}
 	client.sendOffset = 1
 	client.sync_state = client.hello and "capable" or "connected"
 	client.ready_generation = 0
 	client.ready_manifest_hash = nil
-	udpEvents.resetClient(client)
+	if preserve_udp_state then
+		client.udpEventsReady = false
+	else
+		client.pendingEvents = {}
+		client.pendingResults = {}
+		client.awaitingResults = {}
+		client.earlyResults = {}
+		client.recentCompleted = {}
+		udpEvents.resetClient(client)
+	end
 end
 
 local function clearClientBinding(connection, client)
@@ -298,35 +304,32 @@ local function validateBoundPlayer(connection, client)
 	end
 
 	local player = client.player
-	if player.isBot or not player.connection then
-		clearClientBinding(connection, client)
-		return nil
-	end
-
-	if tostring(player.connection.address) ~= tostring(connection.address) then
-		clearClientBinding(connection, client)
-		return nil
-	end
-
+	local player_connection = player.connection
+	local invalid = player.isBot or not player_connection
+		or tostring(player_connection and player_connection.address) ~= tostring(connection.address)
 	if client.helloPayload then
 		local phoneNumber = parsePositiveInteger(client.helloPayload.phoneNumber or client.helloPayload.phone)
 		local subRosaID =
 			parsePositiveInteger(client.helloPayload.subRosaID or client.helloPayload.subrosaID or client.helloPayload.subrosa_id)
 		if phoneNumber and tonumber(player.phoneNumber) ~= phoneNumber then
-			clearClientBinding(connection, client)
-			return nil
+			invalid = true
 		end
 		if subRosaID and tonumber(player.subRosaID) ~= subRosaID then
-			clearClientBinding(connection, client)
-			return nil
+			invalid = true
 		end
+	end
+
+	if invalid then
+		clearClientBinding(connection, client)
+		connection:close()
+		return nil
 	end
 
 	return player
 end
 
 local function refreshClientPlayerBinding(state, connection, client)
-	if not state or not connection or not client then
+	if not state or not connection or not connection.isOpen or not client then
 		return nil
 	end
 
@@ -335,7 +338,7 @@ local function refreshClientPlayerBinding(state, connection, client)
 		return player
 	end
 
-	if client.hello ~= true then
+	if not connection.isOpen or client.hello ~= true then
 		return nil
 	end
 
@@ -1274,24 +1277,55 @@ local function sendInitialCustomVehicleSync(state, connection)
 	end
 end
 
+local function reject_protocol_mismatch(state, connection, payload)
+	local client = state.clients[connection]
+	if tonumber(payload.protocol) == protocol.VERSION then
+		return false
+	end
+
+	log.warn(
+		"SRC protocol mismatch (%s): client=%s server=%d",
+		shared.clientId(connection),
+		tostring(payload.protocol),
+		protocol.VERSION
+	)
+	enqueueFrame(state, connection, "ERROR_REPORT", {
+		code = "SRC_PROTOCOL_MISMATCH",
+		error = string.format(
+			"Client protocol %s is incompatible with server protocol %d",
+			tostring(payload.protocol),
+			protocol.VERSION
+		),
+		fatal = true,
+		serverProtocol = protocol.VERSION,
+	})
+	if client then
+		client.closeAfterFlush = true
+	end
+	return true
+end
+
 local function handleFrame(state, connection, frame)
 	if type(frame) ~= "table" then
 		return
 	end
 
 	local frameType = frame.type
-	local payload = frame.payload or {}
+	local payload = type(frame.payload) == "table" and frame.payload or {}
 	if type(frameType) ~= "string" then
 		return
 	end
 
 	if frameType == "SRC_PING" then
 		local client = state.clients[connection]
+		if reject_protocol_mismatch(state, connection, payload) then
+			return
+		end
 		if client then
 			client.last_heartbeat_at = os.realClock()
 		end
 		enqueueFrame(state, connection, "SRC_PONG", {
-			protocol = 5,
+			protocol = protocol.VERSION,
 		})
 		return
 	end
@@ -1302,6 +1336,9 @@ local function handleFrame(state, connection, frame)
 		if not client then
 			return
 		end
+		if reject_protocol_mismatch(state, connection, payload) then
+			return
+		end
 
 		resetClientSyncState(connection, client)
 		udp_token = udpEvents.new_token()
@@ -1310,6 +1347,7 @@ local function handleFrame(state, connection, frame)
 			enqueueFrame(state, connection, "ERROR_REPORT", {
 				code = "SRC_UDP_UNAVAILABLE",
 				error = "UDP token generation is unavailable",
+				fatal = true,
 			})
 			client.closeAfterFlush = true
 			return
@@ -1330,6 +1368,7 @@ local function handleFrame(state, connection, frame)
 			enqueueFrame(state, connection, "ERROR_REPORT", {
 				code = "SRC_BIND_REJECTED",
 				error = tostring(bindErr),
+				fatal = true,
 			})
 			client.closeAfterFlush = true
 			return
@@ -1339,7 +1378,7 @@ local function handleFrame(state, connection, frame)
 		end
 
 		enqueueFrame(state, connection, "HELLO_ACK", {
-			protocol = 5,
+			protocol = protocol.VERSION,
 			port = server.port,
 			udpToken = udp_token,
 			runtimeID = state.runtimeID,
@@ -1453,6 +1492,21 @@ local function handleFrame(state, connection, frame)
 	if frameType == "EVENTS_UDP_READY" then
 		local client = state.clients[connection]
 		if client and client.hello and client.bound and client.sync_state == "ready" then
+			local retry_tick = state.tick + state.config.eventRetryBaseTicks
+			local completion_expiry =
+				state.tick + math.max(120, tonumber(state.config.eventProcessTimeoutTicks) or 180)
+			for _, pending in pairs(client.pendingEvents or {}) do
+				pending.nextRetryTick = retry_tick
+			end
+			for _, pending in pairs(client.pendingResults or {}) do
+				pending.nextRetryTick = retry_tick
+			end
+			for _, pending in pairs(client.awaitingResults or {}) do
+				pending.deadlineTick = state.tick + state.config.eventProcessTimeoutTicks
+			end
+			for msg_id in pairs(client.recentCompleted or {}) do
+				client.recentCompleted[msg_id] = completion_expiry
+			end
 			client.udpEventsReady = true
 			if state.sync_world_mutations then
 				state.sync_world_mutations(client.player)
@@ -1534,7 +1588,7 @@ end
 
 local function processPendingRetries(state, connection)
 	local client = state.clients[connection]
-	if not client then
+	if not client or client.udpEventsReady ~= true then
 		return
 	end
 	ensureEventTrackingTables(client)
@@ -1823,8 +1877,8 @@ function M.emitClientEvent(state, player, name, eventHash, argsBytes)
 	if player == nil then
 		local sent = 0
 		for connection, client in pairs(state.clients) do
-			local ply = connection.player
-			if connection.isOpen and client.hello and client.bound and (not ply or not ply.isBot) then
+			if connection.isOpen and client.hello and client.bound
+				and validateBoundPlayer(connection, client) then
 				if queueReliableUdpEvent(state, connection, name, eventHash, args) then
 					sent = sent + 1
 				end
@@ -1861,8 +1915,8 @@ function M.syncClientItemTypes(state, player, payload)
 	if player == nil then
 		local sent = 0
 		for connection, client in pairs(state.clients) do
-			local ply = connection.player
-			if connection.isOpen and client.hello and client.bound and (not ply or not ply.isBot) then
+			if connection.isOpen and client.hello and client.bound
+				and validateBoundPlayer(connection, client) then
 				if queueItemTypesSyncFrame(state, connection, payload) then
 					sent = sent + 1
 				end
@@ -1895,8 +1949,8 @@ function M.syncClientVehicleTypes(state, player, payload)
 	if player == nil then
 		local sent = 0
 		for connection, client in pairs(state.clients) do
-			local ply = connection.player
-			if connection.isOpen and client.hello and client.bound and (not ply or not ply.isBot) then
+			if connection.isOpen and client.hello and client.bound
+				and validateBoundPlayer(connection, client) then
 				if queueVehicleTypesSyncFrame(state, connection, payload) then
 					sent = sent + 1
 				end
@@ -1957,8 +2011,8 @@ function M.sendItemTypeIcon(state, player, index, iconPath)
 	if player == nil then
 		local sent = 0
 		for connection, client in pairs(state.clients) do
-			local ply = connection.player
-			if connection.isOpen and client.hello and client.bound and (not ply or not ply.isBot) then
+			if connection.isOpen and client.hello and client.bound
+				and validateBoundPlayer(connection, client) then
 				if queueItemTypeIconFrame(state, connection, index, iconPath) then
 					sent = sent + 1
 				end
@@ -1991,8 +2045,8 @@ function M.sendItemTypeTexture(state, player, index, textureAssignment)
 	if player == nil then
 		local sent = 0
 		for connection, client in pairs(state.clients) do
-			local ply = connection.player
-			if connection.isOpen and client.hello and client.bound and (not ply or not ply.isBot) then
+			if connection.isOpen and client.hello and client.bound
+				and validateBoundPlayer(connection, client) then
 				if queueItemTypeTextureFrame(state, connection, index, textureAssignment) then
 					sent = sent + 1
 				end
@@ -2025,8 +2079,8 @@ function M.sendItemTypeFireSounds(state, player, index, soundAssignment)
 	if player == nil then
 		local sent = 0
 		for connection, client in pairs(state.clients) do
-			local ply = connection.player
-			if connection.isOpen and client.hello and client.bound and (not ply or not ply.isBot) then
+			if connection.isOpen and client.hello and client.bound
+				and validateBoundPlayer(connection, client) then
 				if queueItemTypeFireSoundsFrame(state, connection, index, soundAssignment) then
 					sent = sent + 1
 				end
@@ -2059,8 +2113,8 @@ function M.sendItemTypeITM(state, player, index, itmPath)
 	if player == nil then
 		local sent = 0
 		for connection, client in pairs(state.clients) do
-			local ply = connection.player
-			if connection.isOpen and client.hello and client.bound and (not ply or not ply.isBot) then
+			if connection.isOpen and client.hello and client.bound
+				and validateBoundPlayer(connection, client) then
 				if queueItemTypeITMFrame(state, connection, index, itmPath) then
 					sent = sent + 1
 				end
@@ -2089,8 +2143,8 @@ function M.sendItemTypeIT3(state, player, index, it3Path)
 	if player == nil then
 		local sent = 0
 		for connection, client in pairs(state.clients) do
-			local ply = connection.player
-			if connection.isOpen and client.hello and client.bound and (not ply or not ply.isBot) then
+			if connection.isOpen and client.hello and client.bound
+				and validateBoundPlayer(connection, client) then
 				if queueItemTypeIT3Frame(state, connection, index, it3Path) then
 					sent = sent + 1
 				end
@@ -2119,8 +2173,8 @@ function M.sendHumanModel(state, player, index, assignment)
 	if player == nil then
 		local sent = 0
 		for connection, client in pairs(state.clients) do
-			local ply = connection.player
-			if connection.isOpen and client.hello and client.bound and (not ply or not ply.isBot) then
+			if connection.isOpen and client.hello and client.bound
+				and validateBoundPlayer(connection, client) then
 				if queueHumanModelFrame(state, connection, index, assignment) then
 					sent = sent + 1
 				end
@@ -2153,8 +2207,8 @@ function M.sendVehicleTypeModel(state, player, index, modelName)
 	if player == nil then
 		local sent = 0
 		for connection, client in pairs(state.clients) do
-			local ply = connection.player
-			if connection.isOpen and client.hello and client.bound and (not ply or not ply.isBot) then
+			if connection.isOpen and client.hello and client.bound
+				and validateBoundPlayer(connection, client) then
 				if queueVehicleTypeModelFrame(state, connection, index, modelName) then
 					sent = sent + 1
 				end
@@ -2183,8 +2237,8 @@ function M.sendVehicleTypeAudio(state, player, index, audioRef)
 	if player == nil then
 		local sent = 0
 		for connection, client in pairs(state.clients) do
-			local ply = connection.player
-			if connection.isOpen and client.hello and client.bound and (not ply or not ply.isBot) then
+			if connection.isOpen and client.hello and client.bound
+				and validateBoundPlayer(connection, client) then
 				if queueVehicleTypeAudioFrame(state, connection, index, audioRef) then
 					sent = sent + 1
 				end
@@ -2218,8 +2272,8 @@ function M.sendItemTypeModel(state, player, index, modelName)
 	if player == nil then
 		local sent = 0
 		for connection, client in pairs(state.clients) do
-			local ply = connection.player
-			if connection.isOpen and client.hello and client.bound and (not ply or not ply.isBot) then
+			if connection.isOpen and client.hello and client.bound
+				and validateBoundPlayer(connection, client) then
 				if queueItemTypeModelFrame(state, connection, index, modelName) then
 					sent = sent + 1
 				end
@@ -2247,8 +2301,9 @@ end
 function M.refresh(state)
 	local generation = nextSyncGeneration(state)
 	for connection, client in pairs(state.clients) do
-		if connection.isOpen and client.hello then
-			resetClientSyncState(connection, client)
+		if connection.isOpen and client.hello and client.bound
+			and validateBoundPlayer(connection, client) then
+			resetClientSyncState(connection, client, true)
 			client.generation = generation
 			enqueueFrame(state, connection, "REFRESH_NOTICE", {
 				runtimeID = state.runtimeID,
@@ -2267,44 +2322,47 @@ function M.on_udp_datagram(state, decoded)
 	end
 
 	for _, message in ipairs(decoded.messages) do
+		if not connection.isOpen or not client.hello or not client.bound
+			or not validateBoundPlayer(connection, client) then
+			return
+		end
+
 		if message.kind == 1 then
-			if client.hello and client.bound then
-				ensureEventTrackingTables(client)
-				udpEvents.queueAck(client, message.msgId)
-				local pending_result = client.pendingResults[message.msgId]
-				if pending_result then
-					udpEvents.enqueue(client, pending_result.bytes)
-				elseif not client.recentCompleted[message.msgId] then
-					local result = handleClientEvent(state, connection, message)
-					local resultPayload, encodeErr = eventCodec.encodeArgs(
-						result.status,
-						result.handled,
-						result.errors,
-						result.detail or ""
-					)
-					if resultPayload then
-						if not queueReliableUdpResult(
-							state,
-							connection,
+			ensureEventTrackingTables(client)
+			udpEvents.queueAck(client, message.msgId)
+			local pending_result = client.pendingResults[message.msgId]
+			if pending_result then
+				udpEvents.enqueue(client, pending_result.bytes)
+			elseif not client.recentCompleted[message.msgId] then
+				local result = handleClientEvent(state, connection, message)
+				local resultPayload, encodeErr = eventCodec.encodeArgs(
+					result.status,
+					result.handled,
+					result.errors,
+					result.detail or ""
+				)
+				if resultPayload then
+					if not queueReliableUdpResult(
+						state,
+						connection,
+						result.eventName or udpEvents.formatEventHash(message.eventHash),
+						message.msgId,
+						message.eventHash,
+						resultPayload
+					) then
+						log.warn(
+							"failed to queue result for client event (%s) id=%s client=%s",
 							result.eventName or udpEvents.formatEventHash(message.eventHash),
 							message.msgId,
-							message.eventHash,
-							resultPayload
-						) then
-							log.warn(
-								"failed to queue result for client event (%s) id=%s client=%s",
-								result.eventName or udpEvents.formatEventHash(message.eventHash),
-								message.msgId,
-								shared.clientId(connection)
-							)
-						end
-					else
-						log.warn(
-							"failed to encode result payload for client event (%s): %s",
-							result.eventName or udpEvents.formatEventHash(message.eventHash),
-							tostring(encodeErr)
+							shared.clientId(connection)
 						)
 					end
+				else
+					log.warn(
+						"failed to encode result payload for client event (%s): %s",
+						result.eventName or udpEvents.formatEventHash(message.eventHash),
+						tostring(encodeErr)
+					)
 				end
 			end
 		elseif message.kind == 2 then
@@ -2351,7 +2409,7 @@ function M.getConnectionPlayer(state, connection)
 		return nil
 	end
 
-	return client.player or refreshClientPlayerBinding(state, connection, client)
+	return refreshClientPlayerBinding(state, connection, client)
 end
 
 function M.authorizeAccountTicket(state, account, endpoint)

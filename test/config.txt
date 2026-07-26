@@ -1,0 +1,4 @@
+servername=rs_integration tests
+serverport=27070
+maxnumofplayers=4
+gametype=4

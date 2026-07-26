@@ -1,0 +1,35 @@
+#!/bin/bash
+
+set -euo pipefail
+
+readonly RS_UTILS_TAG="main-5563217ca399a3c49b802977d1878ff292b65025"
+readonly RS_UTILS_ASSET="librosaserver_src_integration-5563217ca399a3c49b802977d1878ff292b65025.zip"
+readonly RS_UTILS_SHA256="daac9bedd508db07c30edf43ef0f727db85356455d054b06928ccfa60a026db3"
+readonly RS_UTILS_URL="https://github.com/SubRosaCustom/rs_utils/releases/download/${RS_UTILS_TAG}/${RS_UTILS_ASSET}"
+
+download_dir=$(mktemp -d)
+probe_pid=
+
+cleanup() {
+	if [[ -n "$probe_pid" ]]; then
+		kill "$probe_pid" 2>/dev/null || true
+		wait "$probe_pid" 2>/dev/null || true
+	fi
+	rm -rf "$download_dir"
+	rm -f libluajit.so libminiz.so librosaserver_src_integration.so
+	rm -f server.srk serverlog.txt udp_outbound.bin udp_probe.ready udp_request.bin
+}
+trap cleanup EXIT
+
+curl --fail --location --silent --show-error "$RS_UTILS_URL" --output "$download_dir/$RS_UTILS_ASSET"
+echo "$RS_UTILS_SHA256  $download_dir/$RS_UTILS_ASSET" | sha256sum --check -
+unzip -q "$download_dir/$RS_UTILS_ASSET" -d "$download_dir"
+cp "$download_dir/libluajit.so" .
+cp "$download_dir/libminiz.so" .
+cp "$download_dir/librosaserver_src_integration.so" .
+
+rm -f udp_outbound.bin udp_probe.ready udp_request.bin
+python3 udp_probe.py &
+probe_pid=$!
+
+timeout 30s env LD_PRELOAD="$(pwd)/libluajit.so $(pwd)/libminiz.so $(pwd)/librosaserver_src_integration.so $(pwd)/librosaserver.so" ./subrosadedicated.x64

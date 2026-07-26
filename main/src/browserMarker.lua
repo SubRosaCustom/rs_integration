@@ -1,3 +1,5 @@
+local protocol = require("main.src.protocol")
+
 local M = {}
 
 local PACKET_SIZE_ADDRESS = 0x39075C7C
@@ -5,7 +7,6 @@ local PACKET_BIT_OFFSET_ADDRESS = 0x39075C80
 local PACKET_ADDRESS = 0x39075C84
 local MAX_PACKET_SIZE = 0x10000
 local MARKER = "SRCE"
-local PROTOCOL_VERSION = 5
 
 local function getBaseAddress()
 	local ok, value = pcall(memory.getBaseAddress)
@@ -124,7 +125,7 @@ function M.onSendPacket(state, address, port)
 		return
 	end
 
-	local trailer = MARKER .. string.pack(">I2", PROTOCOL_VERSION)
+	local trailer = MARKER .. string.pack(">I2", protocol.VERSION)
 	if alignedSize + #trailer > MAX_PACKET_SIZE then
 		return
 	end
