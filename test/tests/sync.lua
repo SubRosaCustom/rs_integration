@@ -9,18 +9,18 @@ end
 
 return function(state, src)
 	assert(find_file(state.scripts, "test.lua"))
-	assert(find_file(state.assetFiles, "test.wav"))
-	assert(type(state.manifestHash) == "string" and state.manifestHash:match("^[0-9a-f]+$"))
-	assert(#state.manifestHash == 64)
+	assert(find_file(state.asset_files, "test.wav"))
+	assert(type(state.manifest_hash) == "string" and state.manifest_hash:match("^[0-9a-f]+$"))
+	assert(#state.manifest_hash == 64)
 
-	local client_bundle = assert(state.syncBundlesById.clientroot)
+	local client_bundle = assert(state.sync_bundles_by_id.clientroot)
 	local files = miniz.extractZip(client_bundle.archive)
 	assert(files["test.lua"] == "return \"fixture\"\n")
 	assert(files["test.wav"] == "fixture asset\n")
 
-	local generation = state.syncGeneration
-	local manifest_hash = state.manifestHash
+	local generation = state.sync_generation
+	local manifest_hash = state.manifest_hash
 	src.refreshSyncFiles()
-	assert(state.syncGeneration == generation + 1)
-	assert(state.manifestHash == manifest_hash)
+	assert(state.sync_generation == generation + 1)
+	assert(state.manifest_hash == manifest_hash)
 end

@@ -55,8 +55,8 @@ config = {
 
 local src = require("main.src.init")
 local network = require("main.src.network")
-local shared = require("main.src.shared")
-local state = shared.getState()
+local runtime_state = require("main.src.runtime_state")
+local state = runtime_state.get()
 
 local function log(message)
 	print(string.format("\27[34;1m[rs_integration test]\27[0m %s", message))
@@ -92,6 +92,7 @@ end
 local function run_tests()
 	require_test("tests.runtime")
 	require_test("tests.sync")
+	require_test("tests.tcp")
 	require_test("tests.udp")
 end
 

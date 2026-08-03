@@ -37,8 +37,11 @@ This repository is the server half of SRC. It is not the native client mod, and 
 
 - `main/src/init.lua` installs the SRC runtime into the server
 - `main/src/network.lua` owns the protocol and connection lifecycle
-- `main/src/shared.lua` owns config, paths, and shared state
-- `main/src/itemTypes.lua` owns custom item type sync helpers
+- `main/src/config.lua` resolves SRC configuration
+- `main/src/runtime_state.lua` owns reload-persistent runtime state
+- `main/src/sync_paths.lua` validates and resolves synchronized paths
+- `main/src/sync_snapshot.lua` builds synchronized file and bundle snapshots
+- `main/src/item_types.lua` owns custom item type sync helpers
 - `main/src/watcher.lua` owns the watcher helper used by SRC utility plugins
 - `plugins/srcutils.lua` owns `/srcrefresh`, `/srcstatus`, `/srcclients`, `/srcwatch`, `/srcdisableplugin`, `/srcenableplugin`, `/srcdumpstate`, and `/srckicknonsrc`
 - `plugins/srccShowcase.lua` is an example server plugin

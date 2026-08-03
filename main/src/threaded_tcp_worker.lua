@@ -110,10 +110,6 @@ local function close_connection(id)
 	sendMessage(codec.encode(codec.CLOSED, id, 0))
 end
 
-local function encode_binary_frame(frame_type, payload)
-	return "SRCB" .. string.pack(">I2I4", #frame_type, #payload) .. frame_type .. payload
-end
-
 local function cache_bundle(payload)
 	if #payload < 3 then
 		error("invalid bundle cache command")
@@ -167,7 +163,7 @@ local function fill_stream_queue(connection)
 			local payload = string.pack(">I2", #stream.id) .. stream.id .. chunk
 			stream.offset = stream.offset + #chunk
 			connection.send_queue[#connection.send_queue + 1] = {
-				bytes = encode_binary_frame("BUNDLE_CHUNK", payload),
+				bytes = codec.encode_binary_frame("BUNDLE_CHUNK", payload),
 				offset = 1,
 				main_owned = false,
 			}

@@ -23,7 +23,7 @@ local function new_connection(server, event)
 		id = event.id,
 		address = event.payload,
 		port = event.value,
-		isOpen = true,
+		is_open = true,
 		receive_queue = {},
 		receive_offset = 1,
 		pending_receive_bytes = 0,
@@ -72,10 +72,10 @@ local function new_connection(server, event)
 	end
 
 	function connection:close()
-		if not self.isOpen then
+		if not self.is_open then
 			return
 		end
-		self.isOpen = false
+		self.is_open = false
 		server.worker:sendMessage(codec.encode(codec.CLOSE, self.id, 0))
 	end
 
@@ -116,8 +116,8 @@ function M.new(port)
 	local server = setmetatable({
 		worker = Worker.new(WORKER_PATH),
 		port = port,
-		isOpen = true,
-		isListening = false,
+		is_open = true,
+		is_listening = false,
 		accept_queue = {},
 		connections = {},
 		cached_bundle_hashes = {},
@@ -133,9 +133,9 @@ function Server:poll()
 	for _ = 1, MAX_EVENTS_PER_POLL do
 		local message = self.worker:receiveMessage()
 		if message == nil then
-			if not self.isListening and os.realClock() - self.started_at >= STARTUP_TIMEOUT_SECONDS then
+			if not self.is_listening and os.realClock() - self.started_at >= STARTUP_TIMEOUT_SECONDS then
 				self.last_error = "TCP worker startup timed out"
-				self.isOpen = false
+				self.is_open = false
 			end
 			return
 		end
@@ -143,19 +143,19 @@ function Server:poll()
 		local event, decode_error = codec.decode(message)
 		if not event then
 			self.last_error = decode_error
-			self.isOpen = false
+			self.is_open = false
 			return
 		end
 
 		if event.kind == codec.LISTENING then
-			self.isListening = true
+			self.is_listening = true
 		elseif event.kind == codec.ACCEPTED then
 			local connection = new_connection(self, event)
 			self.connections[event.id] = connection
 			self.accept_queue[#self.accept_queue + 1] = connection
 		elseif event.kind == codec.DATA then
 			local connection = self.connections[event.id]
-			if connection and connection.isOpen then
+			if connection and connection.is_open then
 				if connection.pending_receive_bytes + #event.payload > MAX_PENDING_RECEIVE_BYTES then
 					connection:close()
 				else
@@ -173,7 +173,7 @@ function Server:poll()
 		elseif event.kind == codec.CLOSED then
 			local connection = self.connections[event.id]
 			if connection then
-				connection.isOpen = false
+				connection.is_open = false
 				self.connections[event.id] = nil
 			end
 		elseif event.kind == codec.STREAM_DONE then
@@ -198,11 +198,11 @@ function Server:poll()
 			end
 		elseif event.kind == codec.ERROR then
 			self.last_error = event.payload
-			self.isOpen = false
+			self.is_open = false
 			return
 		else
 			self.last_error = "unknown TCP worker event"
-			self.isOpen = false
+			self.is_open = false
 			return
 		end
 	end
@@ -211,7 +211,7 @@ end
 function Server:accept()
 	while #self.accept_queue > 0 do
 		local connection = pop_front(self.accept_queue)
-		if connection.isOpen then
+		if connection.is_open then
 			return connection
 		end
 	end
@@ -223,10 +223,10 @@ function Server:close()
 		return
 	end
 	self.stopped = true
-	self.isOpen = false
+	self.is_open = false
 	self.worker:stop()
 	for _, connection in pairs(self.connections) do
-		connection.isOpen = false
+		connection.is_open = false
 	end
 	self.connections = {}
 	self.accept_queue = {}

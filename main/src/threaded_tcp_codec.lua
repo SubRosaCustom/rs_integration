@@ -16,6 +16,8 @@ local M = {
 	SEND_STATS = 23,
 }
 
+local BINARY_MAGIC = "SRCB"
+
 function M.encode(kind, id, value, payload)
 	return string.pack(">BI4I4", kind, id, value) .. (payload or "")
 end
@@ -37,6 +39,18 @@ end
 function M.encode_error(message)
 	local payload = tostring(message):sub(1, 512)
 	return M.encode(M.ERROR, 0, #payload, payload)
+end
+
+function M.encode_binary_frame(frame_type, payload)
+	if type(frame_type) ~= "string" or frame_type == "" then
+		return nil
+	end
+
+	if type(payload) ~= "string" then
+		payload = ""
+	end
+
+	return string.pack(">c4I2I4", BINARY_MAGIC, #frame_type, #payload) .. frame_type .. payload
 end
 
 return M

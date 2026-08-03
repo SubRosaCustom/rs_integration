@@ -7,33 +7,35 @@ plugin.description = "Utility commands and optional auto-refresh support for SRC
 require("main.src.init")
 
 local json = require("main.json")
+local runtime_state = require("main.src.runtime_state")
+local sync_paths = require("main.src.sync_paths")
 local watcher = require("main.src.watcher")
-local shared = require("main.src.shared")
 
 local src = assert(_G.src, "SRC utils requires main.src.init to initialize first")
-local state = shared.getState()
+local state = runtime_state.get()
 local disabled_plugins_file = "disabledPlugins.json"
+local message_player = messagePlayerWrap
 
 local function refresh_now()
 	src.refreshSyncFiles()
 end
 
 local function scripts_root()
-	return shared.scriptsRoot(state.config)
+	return sync_paths.scripts_root(state.config)
 end
 
 local function disabled_plugins_path()
-	return shared.joinPath(scripts_root(), disabled_plugins_file)
+	return sync_paths.join(scripts_root(), disabled_plugins_file)
 end
 
 local function read_disabled_plugins()
-	local source = shared.readFile(disabled_plugins_path())
+	local source = sync_paths.read_file(disabled_plugins_path())
 	if not source or source == "" then
 		return {}
 	end
 
-	local decoded = shared.safeJsonDecode(source)
-	if type(decoded) ~= "table" then
+	local ok, decoded = pcall(json.decode, source)
+	if not ok or type(decoded) ~= "table" then
 		error(string.format("Invalid %s", disabled_plugins_file))
 	end
 
@@ -73,7 +75,7 @@ local function write_disabled_plugins(names)
 end
 
 local function collect_client_plugin_names()
-	local plugins_root = shared.joinPath(scripts_root(), "plugins")
+	local plugins_root = sync_paths.join(scripts_root(), "plugins")
 	local ok, entries = pcall(os.listDirectory, plugins_root)
 	if not ok or type(entries) ~= "table" then
 		return {}
@@ -82,8 +84,8 @@ local function collect_client_plugin_names()
 	local names = {}
 	for _, entry in ipairs(entries) do
 		if entry.isDirectory then
-			local init_path = shared.joinPath(shared.joinPath(plugins_root, entry.name), "init.lua")
-			if shared.readFile(init_path) then
+			local init_path = sync_paths.join(sync_paths.join(plugins_root, entry.name), "init.lua")
+			if sync_paths.read_file(init_path) then
 				names[entry.name] = true
 			end
 		else
@@ -134,7 +136,7 @@ local function count_clients()
 	local bound = 0
 
 	for connection, client in pairs(state.clients) do
-		if connection and connection.isOpen and client then
+		if connection and connection.is_open and client then
 			total = total + 1
 			if client.hello then
 				hello = hello + 1
@@ -165,7 +167,7 @@ plugin.commands["/srcrefresh"] = {
 		assert(src.enabled, "SRC is disabled")
 		refresh_now()
 		local message = "SRC refresh queued for all connected clients"
-		messagePlayerWrap(ply, message)
+		message_player(ply, message)
 	end,
 }
 
@@ -175,30 +177,30 @@ plugin.commands["/srcstatus"] = {
 		return ply.isConsole or ply.isAdmin
 	end,
 	call = function(ply)
-		local totalClients, helloClients, boundClients = count_clients()
-		messagePlayerWrap(
+		local total_clients, hello_clients, bound_clients = count_clients()
+		message_player(
 			ply,
 			string.format(
 				"SRC enabled=%s runtimeActive=%s port=%s scripts=%d assets=%d clients=%d hello=%d bound=%d watch=%s",
 				tostring(src.enabled == true),
-				tostring(state.runtimeActive == true),
-				tostring(state.boundPort or "unbound"),
+				tostring(state.runtime_active == true),
+				tostring(state.bound_port or "unbound"),
 				#state.scripts,
-				#state.assetFiles,
-				totalClients,
-				helloClients,
-				boundClients,
+				#state.asset_files,
+				total_clients,
+				hello_clients,
+				bound_clients,
 				tostring(state.config.autoRefreshEnabled == true)
 			)
 		)
-		messagePlayerWrap(
+		message_player(
 			ply,
 			string.format(
 				"SRC runtimeID=%s syncGeneration=%s loadedLevel=%s persistentMode=%s",
-				tostring(state.runtimeID),
-				tostring(state.syncGeneration),
-				state.loadedLevel ~= "" and state.loadedLevel or "<none>",
-				state.persistentMode ~= "" and state.persistentMode or "<none>"
+				tostring(state.runtime_id),
+				tostring(state.sync_generation),
+				state.loaded_level ~= "" and state.loaded_level or "<none>",
+				state.persistent_mode ~= "" and state.persistent_mode or "<none>"
 			)
 		)
 	end,
@@ -214,7 +216,7 @@ plugin.commands["/srcclients"] = {
 		local ordinal = 0
 
 		for connection, client in pairs(state.clients) do
-			if connection and connection.isOpen and client then
+			if connection and connection.is_open and client then
 				ordinal = ordinal + 1
 				rows[#rows + 1] = {
 					id = ordinal,
@@ -222,9 +224,9 @@ plugin.commands["/srcclients"] = {
 					hello = client.hello == true and "yes" or "no",
 					bound = client.bound == true and "yes" or "no",
 					generation = tostring(client.generation or 0),
-					sendFrames = #client.sendQueue,
-					pendingFiles = #client.pendingFileRequests,
-					pendingEvents = table.numElements(client.pendingEvents or {}),
+					send_frames = #client.send_queue,
+					pending_files = #client.pending_file_requests,
+					pending_events = table.numElements(client.pending_events or {}),
 				}
 			end
 		end
@@ -234,13 +236,13 @@ plugin.commands["/srcclients"] = {
 		end)
 
 		if #rows == 0 then
-			messagePlayerWrap(ply, "No SRC TCP clients connected")
+			message_player(ply, "No SRC TCP clients connected")
 			return
 		end
 
 		for i = 1, #rows do
 			local row = rows[i]
-			messagePlayerWrap(
+			message_player(
 				ply,
 				string.format(
 					"client#%d player=%s hello=%s bound=%s gen=%s sendFrames=%d pendingFiles=%d pendingEvents=%d",
@@ -249,9 +251,9 @@ plugin.commands["/srcclients"] = {
 					row.hello,
 					row.bound,
 					row.generation,
-					row.sendFrames,
-					row.pendingFiles,
-					row.pendingEvents
+					row.send_frames,
+					row.pending_files,
+					row.pending_events
 				)
 			)
 		end
@@ -270,7 +272,7 @@ plugin.commands["/srcwatch"] = {
 			watcher.clear(state)
 		end
 
-		messagePlayerWrap(
+		message_player(
 			ply,
 			string.format(
 				"%s watching SRC client root %s",
@@ -301,7 +303,7 @@ plugin.commands["/srcenableplugin"] = {
 		disabled[plugin_name] = nil
 		write_disabled_plugins(disabled)
 		refresh_now()
-		messagePlayerWrap(ply, string.format("Enabled SRC client plugin %s", plugin_name))
+		message_player(ply, string.format("Enabled SRC client plugin %s", plugin_name))
 	end,
 }
 
@@ -325,7 +327,7 @@ plugin.commands["/srcdisableplugin"] = {
 		disabled[plugin_name] = true
 		write_disabled_plugins(disabled)
 		refresh_now()
-		messagePlayerWrap(ply, string.format("Disabled SRC client plugin %s", plugin_name))
+		message_player(ply, string.format("Disabled SRC client plugin %s", plugin_name))
 	end,
 }
 
@@ -335,68 +337,68 @@ plugin.commands["/srcdumpstate"] = {
 		return ply.isConsole or ply.isAdmin
 	end,
 	call = function(ply)
-		local totalClients, helloClients, boundClients = count_clients()
-		local totalSendFrames = 0
-		local totalSendBytes = 0
-		local totalPendingFiles = 0
-		local totalPendingEvents = 0
-		local totalAwaitingResults = 0
+		local total_clients, hello_clients, bound_clients = count_clients()
+		local total_send_frames = 0
+		local total_send_bytes = 0
+		local total_pending_files = 0
+		local total_pending_events = 0
+		local total_awaiting_results = 0
 
 		for connection, client in pairs(state.clients) do
-			if connection and connection.isOpen and client then
-				totalSendFrames = totalSendFrames + #client.sendQueue
-				totalSendBytes = totalSendBytes + count_queued_bytes(client.sendQueue)
-				totalPendingFiles = totalPendingFiles + #client.pendingFileRequests
-				totalPendingEvents = totalPendingEvents + table.numElements(client.pendingEvents or {})
-				totalAwaitingResults = totalAwaitingResults + table.numElements(client.awaitingResults or {})
+			if connection and connection.is_open and client then
+				total_send_frames = total_send_frames + #client.send_queue
+				total_send_bytes = total_send_bytes + count_queued_bytes(client.send_queue)
+				total_pending_files = total_pending_files + #client.pending_file_requests
+				total_pending_events = total_pending_events + table.numElements(client.pending_events or {})
+				total_awaiting_results = total_awaiting_results + table.numElements(client.awaiting_results or {})
 			end
 		end
 
-		messagePlayerWrap(
+		message_player(
 			ply,
 			string.format(
 				"runtimeID=%s enabled=%s runtimeActive=%s tick=%s syncGeneration=%s boundPort=%s",
-				tostring(state.runtimeID),
+				tostring(state.runtime_id),
 				tostring(src.enabled == true),
-				tostring(state.runtimeActive == true),
+				tostring(state.runtime_active == true),
 				tostring(state.tick),
-				tostring(state.syncGeneration),
-				tostring(state.boundPort or "unbound")
+				tostring(state.sync_generation),
+				tostring(state.bound_port or "unbound")
 			)
 		)
-		messagePlayerWrap(
+		message_player(
 			ply,
 			string.format(
 				"scripts=%d assets=%d loadedLevel=%s persistentMode=%s nextEventID=%s",
 				#state.scripts,
-				#state.assetFiles,
-				state.loadedLevel ~= "" and state.loadedLevel or "<none>",
-				state.persistentMode ~= "" and state.persistentMode or "<none>",
-				tostring(state.nextEventID)
+				#state.asset_files,
+				state.loaded_level ~= "" and state.loaded_level or "<none>",
+				state.persistent_mode ~= "" and state.persistent_mode or "<none>",
+				tostring(state.next_event_id)
 			)
 		)
-		messagePlayerWrap(
+		message_player(
 			ply,
 			string.format(
 				"watchEnabled=%s watchRoot=%s watchedDirs=%d pendingRefreshTick=%s",
 				tostring(state.config.autoRefreshEnabled == true),
-				tostring(state.watchedRoot or "<none>"),
-				table.numElements(state.watchedDirectories or {}),
-				tostring(state.pendingRefreshTick or "<none>")
+				tostring(state.watched_root or "<none>"),
+				table.numElements(state.watched_directories or {}),
+				tostring(state.pending_refresh_tick or "<none>")
 			)
 		)
-		messagePlayerWrap(
+		message_player(
 			ply,
 			string.format(
 				"clients=%d hello=%d bound=%d sendFrames=%d sendBytes=%d pendingFiles=%d pendingEvents=%d awaitingResults=%d",
-				totalClients,
-				helloClients,
-				boundClients,
-				totalSendFrames,
-				totalSendBytes,
-				totalPendingFiles,
-				totalPendingEvents,
-				totalAwaitingResults
+				total_clients,
+				hello_clients,
+				bound_clients,
+				total_send_frames,
+				total_send_bytes,
+				total_pending_files,
+				total_pending_events,
+				total_awaiting_results
 			)
 		)
 	end,
@@ -411,15 +413,15 @@ plugin.commands["/srckicknonsrc"] = {
 		local kicked = 0
 
 		for _, player in ipairs(players.getNonBots()) do
-			local clientState = src.getClientState(player)
-			if player.connection and not clientState.connected then
+			local client_state = src.getClientState(player)
+			if player.connection and not client_state.connected then
 				player:sendMessage("SRC is required on this server")
 				player.connection.timeoutTime = 50 * server.TPS
 				kicked = kicked + 1
 			end
 		end
 
-		messagePlayerWrap(ply, string.format("Kicked %d non-SRC player(s)", kicked))
+		message_player(ply, string.format("Kicked %d non-SRC player(s)", kicked))
 	end,
 }
 

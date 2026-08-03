@@ -3,9 +3,9 @@ return function(state, src)
 
 	assert(src.enabled)
 	assert(state.enabled)
-	assert(state.runtimeActive)
-	assert(state.hooksRegistered)
-	assert(state.moduleLoaded)
+	assert(state.runtime_active)
+	assert(state.hooks_registered)
+	assert(state.module_loaded)
 
 	assert(protocol.VERSION == 5)
 
@@ -19,13 +19,13 @@ return function(state, src)
 	local attempts = 0
 	local function wait_for_tcp_worker()
 		attempts = attempts + 1
-		if not state.tcpServer or not state.tcpServer.isListening then
-			assert(attempts < 600, state.tcpServer and state.tcpServer.last_error or "TCP worker did not start")
+		if not state.tcp_server or not state.tcp_server.is_listening then
+			assert(attempts < 600, state.tcp_server and state.tcp_server.last_error or "TCP worker did not start")
 			next_test_tick(wait_for_tcp_worker)
 			return
 		end
 
-		assert(state.boundPort == server.port)
+		assert(state.bound_port == server.port)
 	end
 	next_test_tick(wait_for_tcp_worker)
 end

@@ -1,6 +1,6 @@
-local event_codec = require("main.src.eventCodec")
+local event_codec = require("main.src.event_codec")
 local network = require("main.src.network")
-local udp_events = require("main.src.udpEvents")
+local udp_events = require("main.src.udp_events")
 
 local function read_file(path)
 	local file = io.open(path, "rb")
@@ -20,12 +20,12 @@ end
 
 return function(state, src)
 	local connection = {
-		isOpen = true,
+		is_open = true,
 		address = "127.0.0.1",
 		port = 27071,
 	}
 	function connection:close()
-		self.isOpen = false
+		self.is_open = false
 	end
 	function connection:discard_pending_sends()
 	end
@@ -41,25 +41,25 @@ return function(state, src)
 
 	local token = assert(udp_events.new_token())
 	local client = {
-		recvBuffer = "",
-		sendQueue = {},
-		sendOffset = 1,
-		pendingFileRequests = {},
-		pendingBundleRequests = {},
-		pendingEvents = {},
-		pendingResults = {},
-		awaitingResults = {},
-		earlyResults = {},
-		recentCompleted = {},
+		receive_buffer = "",
+		send_queue = {},
+		send_offset = 1,
+		pending_file_requests = {},
+		pending_bundle_requests = {},
+		pending_events = {},
+		pending_results = {},
+		awaiting_results = {},
+		early_results = {},
+		recent_completed = {},
 		hello = true,
-		helloPayload = nil,
+		hello_payload = nil,
 		bound = true,
-		udpEventsReady = true,
+		udp_events_ready = true,
 		udp_token = token,
-		udpSendQueue = {},
-		udpPendingAckOrder = {},
-		udpPendingAckSet = {},
-		udpPendingAckStart = 1,
+		udp_send_queue = {},
+		udp_pending_ack_order = {},
+		udp_pending_ack_set = {},
+		udp_pending_ack_start = 1,
 		last_heartbeat_at = os.realClock(),
 		sync_state = "ready",
 		player = {
@@ -76,29 +76,29 @@ return function(state, src)
 	local reset_client = {
 		udp_token = token,
 	}
-	udp_events.resetClient(reset_client)
+	udp_events.reset_client(reset_client)
 	assert(reset_client.udp_token == nil)
 
-	local pending_events = client.pendingEvents
-	local pending_results = client.pendingResults
-	local awaiting_results = client.awaitingResults
-	local early_results = client.earlyResults
-	local recent_completed = client.recentCompleted
-	local udp_send_queue = client.udpSendQueue
-	local udp_pending_ack_order = client.udpPendingAckOrder
-	local udp_pending_ack_set = client.udpPendingAckSet
+	local pending_events = client.pending_events
+	local pending_results = client.pending_results
+	local awaiting_results = client.awaiting_results
+	local early_results = client.early_results
+	local recent_completed = client.recent_completed
+	local udp_send_queue = client.udp_send_queue
+	local udp_pending_ack_order = client.udp_pending_ack_order
+	local udp_pending_ack_set = client.udp_pending_ack_set
 	network.refresh(state)
-	assert(client.pendingEvents == pending_events)
-	assert(client.pendingResults == pending_results)
-	assert(client.awaitingResults == awaiting_results)
-	assert(client.earlyResults == early_results)
-	assert(client.recentCompleted == recent_completed)
-	assert(client.udpSendQueue == udp_send_queue)
-	assert(client.udpPendingAckOrder == udp_pending_ack_order)
-	assert(client.udpPendingAckSet == udp_pending_ack_set)
+	assert(client.pending_events == pending_events)
+	assert(client.pending_results == pending_results)
+	assert(client.awaiting_results == awaiting_results)
+	assert(client.early_results == early_results)
+	assert(client.recent_completed == recent_completed)
+	assert(client.udp_send_queue == udp_send_queue)
+	assert(client.udp_pending_ack_order == udp_pending_ack_order)
+	assert(client.udp_pending_ack_set == udp_pending_ack_set)
 	assert(client.udp_token == token)
-	assert(not client.udpEventsReady)
-	client.udpEventsReady = true
+	assert(not client.udp_events_ready)
+	client.udp_events_ready = true
 
 	local handled = 0
 	assert(src.onClientEvent("test.loopback", function(_, value)
@@ -107,9 +107,9 @@ return function(state, src)
 		return "processed"
 	end))
 
-	local event_hash = assert(udp_events.hashEventName("test.loopback"))
-	local args = assert(event_codec.encodeArgs("payload"))
-	local message = assert(udp_events.encodeReliableEvent(event_hash, 7, args))
+	local event_hash = assert(udp_events.hash_event_name("test.loopback"))
+	local args = assert(event_codec.encode_args("payload"))
+	local message = assert(udp_events.encode_reliable_event(event_hash, 7, args))
 	local batch = string.pack(">BBI2I4", 1, 0, 1, #message) .. message
 	local datagram = string.pack(">c4c4BBc32I2", "7DFP", "SRCU", 1, 0, token, #batch) .. batch
 
@@ -130,7 +130,7 @@ return function(state, src)
 	local function wait_for_results()
 		result_attempts = result_attempts + 1
 		if handled == 1 and not sent then
-			udp_events.onSendPacket(state, "127.0.0.1", 27071)
+			udp_events.on_send_packet(state, "127.0.0.1", 27071)
 			sent = true
 		end
 
@@ -164,9 +164,9 @@ return function(state, src)
 		end
 		assert(message_kinds[2])
 		assert(message_kinds[3])
-		assert(client.pendingResults[7])
-		assert(#client.udpPendingAckOrder == 0)
-		assert(#client.udpSendQueue == 0)
+		assert(client.pending_results[7])
+		assert(#client.udp_pending_ack_order == 0)
+		assert(#client.udp_send_queue == 0)
 
 		client.player.connection = nil
 		network.on_udp_datagram(state, {
@@ -178,7 +178,7 @@ return function(state, src)
 				},
 			},
 		})
-		assert(not connection.isOpen)
+		assert(not connection.is_open)
 		assert(not client.bound)
 		state.clients[connection] = nil
 	end

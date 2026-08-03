@@ -8,16 +8,21 @@ readonly RS_UTILS_SHA256="daac9bedd508db07c30edf43ef0f727db85356455d054b06928ccf
 readonly RS_UTILS_URL="https://github.com/SubRosaCustom/rs_utils/releases/download/${RS_UTILS_TAG}/${RS_UTILS_ASSET}"
 
 download_dir=$(mktemp -d)
-probe_pid=
+udp_probe_pid=
+tcp_probe_pid=
 
 cleanup() {
-	if [[ -n "$probe_pid" ]]; then
-		kill "$probe_pid" 2>/dev/null || true
-		wait "$probe_pid" 2>/dev/null || true
+	if [[ -n "$udp_probe_pid" ]]; then
+		kill "$udp_probe_pid" 2>/dev/null || true
+		wait "$udp_probe_pid" 2>/dev/null || true
+	fi
+	if [[ -n "$tcp_probe_pid" ]]; then
+		kill "$tcp_probe_pid" 2>/dev/null || true
+		wait "$tcp_probe_pid" 2>/dev/null || true
 	fi
 	rm -rf "$download_dir"
 	rm -f libluajit.so libminiz.so librosaserver_src_integration.so
-	rm -f server.srk serverlog.txt udp_outbound.bin udp_probe.ready udp_request.bin
+	rm -f server.srk serverlog.txt tcp_framing.json udp_outbound.bin udp_probe.ready udp_request.bin
 }
 trap cleanup EXIT
 
@@ -28,8 +33,10 @@ cp "$download_dir/libluajit.so" .
 cp "$download_dir/libminiz.so" .
 cp "$download_dir/librosaserver_src_integration.so" .
 
-rm -f udp_outbound.bin udp_probe.ready udp_request.bin
+rm -f tcp_framing.json udp_outbound.bin udp_probe.ready udp_request.bin
 python3 udp_probe.py &
-probe_pid=$!
+udp_probe_pid=$!
+python3 tcp_framing_probe.py &
+tcp_probe_pid=$!
 
 timeout 30s env LD_PRELOAD="$(pwd)/libluajit.so $(pwd)/libminiz.so $(pwd)/librosaserver_src_integration.so $(pwd)/librosaserver.so" ./subrosadedicated.x64

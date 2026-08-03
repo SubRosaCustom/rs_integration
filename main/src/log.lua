@@ -1,6 +1,6 @@
 local M = {}
 
-local function formatMessage(...)
+local function format_message(...)
 	local count = select("#", ...)
 	if count == 0 then
 		return ""
@@ -25,16 +25,16 @@ local function formatMessage(...)
 	return table.concat(parts, "\t")
 end
 
-local function timePrefix()
+local function time_prefix()
 	return "\27[30;1m[" .. os.date("%X") .. "]\27[0m "
 end
 
 function M.info(...)
-	print(timePrefix() .. "\27[38;5;45m[SRC]\27[0m " .. formatMessage(...))
+	print(time_prefix() .. "\27[38;5;45m[SRC]\27[0m " .. format_message(...))
 end
 
 function M.warn(...)
-	print(timePrefix() .. "\27[33m[SRC]\27[0m " .. formatMessage(...))
+	print(time_prefix() .. "\27[33m[SRC]\27[0m " .. format_message(...))
 end
 
 return M
