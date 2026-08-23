@@ -76,6 +76,12 @@ function src.refreshSyncFiles()
 	refresh_now()
 end
 
+function src.reloadClientPlugin(plugin_name)
+	assert(type(plugin_name) == "string" and plugin_name ~= "", "src.reloadClientPlugin(plugin_name): plugin_name must be non-empty string")
+	sync_snapshot.discover(state)
+	network.refresh(state, plugin_name)
+end
+
 function src.onClientEvent(name, fn)
 	assert(type(name) == "string" and name ~= "", "src.onClientEvent(name, fn): name must be non-empty string")
 	assert(type(fn) == "function", "src.onClientEvent(name, fn): fn must be function")

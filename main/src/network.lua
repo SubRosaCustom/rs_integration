@@ -1220,6 +1220,24 @@ local function queue_human_model_frame(state, connection, index, assignment)
 	})
 end
 
+local function queue_human_accessory_frame(state, connection, message_type, index, assignment)
+	local client = state.clients[connection]
+	if not client or not connection.is_open or not client.hello then
+		return false
+	end
+	if type(assignment) ~= "table"
+		or type(assignment.male) ~= "string" or assignment.male == ""
+		or type(assignment.female) ~= "string" or assignment.female == "" then
+		return false
+	end
+
+	return enqueue_frame(state, connection, message_type, {
+		index = index,
+		male = assignment.male,
+		female = assignment.female,
+	})
+end
+
 local function send_initial_custom_item_sync(state, connection)
 	local item_types = require("main.src.item_types")
 	if type(item_types.build_sync_payload) == "function" then
@@ -1283,6 +1301,13 @@ local function send_initial_custom_item_sync(state, connection)
 		for idx, assignment in pairs(human_model_assignments) do
 			queue_human_model_frame(state, connection, idx, assignment)
 		end
+	end
+
+	for idx, assignment in pairs(state.human_necktie_assignments or {}) do
+		queue_human_accessory_frame(state, connection, "HUMAN_NECKTIE_DEF", idx, assignment)
+	end
+	for idx, assignment in pairs(state.human_necklace_assignments or {}) do
+		queue_human_accessory_frame(state, connection, "HUMAN_NECKLACE_DEF", idx, assignment)
 	end
 end
 
@@ -2169,6 +2194,34 @@ function M.send_human_model(state, player, index, assignment)
 	return queue_human_model_frame(state, connection, index, assignment)
 end
 
+local function send_human_accessory(state, player, message_type, index, assignment)
+	if player == nil then
+		local sent = 0
+		for connection, client in pairs(state.clients) do
+			if connection.is_open and client.hello and client.bound
+				and validate_bound_player(connection, client)
+				and queue_human_accessory_frame(state, connection, message_type, index, assignment) then
+				sent = sent + 1
+			end
+		end
+		return sent
+	end
+
+	if type(player) ~= "userdata" or player.class ~= "Player" or player.isBot then
+		return false
+	end
+	local connection = get_player_connection(state, player)
+	return connection and queue_human_accessory_frame(state, connection, message_type, index, assignment) or false
+end
+
+function M.send_human_necktie(state, player, index, assignment)
+	return send_human_accessory(state, player, "HUMAN_NECKTIE_DEF", index, assignment)
+end
+
+function M.send_human_necklace(state, player, index, assignment)
+	return send_human_accessory(state, player, "HUMAN_NECKLACE_DEF", index, assignment)
+end
+
 function M.send_vehicle_type_model(state, player, index, model_name)
 	if player == nil then
 		local sent = 0
@@ -2259,7 +2312,7 @@ function M.send_item_type_model(state, player, index, model_name)
 	return queue_item_type_model_frame(state, connection, index, model_name)
 end
 
-function M.refresh(state)
+function M.refresh(state, plugin_name)
 	local generation = next_sync_generation(state)
 	for connection, client in pairs(state.clients) do
 		if connection.is_open and client.hello and client.bound
@@ -2270,6 +2323,7 @@ function M.refresh(state)
 				runtimeID = state.runtime_id,
 				syncGeneration = generation,
 				manifestHash = state.manifest_hash,
+				pluginReload = plugin_name,
 			})
 		end
 	end
@@ -2388,11 +2442,9 @@ function M.authorize_account_ticket(state, account, endpoint)
 		local claimed_phone = client and client.hello_payload
 			and parse_positive_integer(client.hello_payload.phoneNumber or client.hello_payload.phone)
 		if connection.is_open
-			and tostring(connection.address) == address
+			-- and tostring(connection.address) == address
 			and claimed_phone == phone_number
-			and client.sync_state == "ready"
-			and client.ready_generation == state.sync_generation
-			and client.ready_manifest_hash == state.manifest_hash
+			and client.hello == true
 			and tostring(client.game_address) == address
 			and tonumber(client.game_port) == tonumber(endpoint.port) then
 			client.admitted_address = address

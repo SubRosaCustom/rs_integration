@@ -36,6 +36,10 @@ function src.onClientEvent(name, fn) end
 ---@return integer|boolean sent The number of clients queued when broadcasting, or whether the event was queued for a single player.
 function src.emitClientEvent(player, name, ...) end
 
+---Reload a synced client plugin on all connected SRC clients.
+---@param plugin_name string
+function src.reloadClientPlugin(plugin_name) end
+
 ---Send a custom item type sync payload to clients.
 ---Prefer src.syncCustomItemTypes, which builds the payload for you.
 ---@param player Player|nil The target player, or nil to broadcast.
@@ -125,6 +129,27 @@ function src.setVehicleTypeAudio(indexOrType, audioRef, player) end
 ---@return integer index The normalized model index.
 function src.registerHumanModel(index, def) end
 
+---Register a custom necktie model (CMC pair) at an accessory index and sync
+---it to all SRC clients.
+---@param index integer The custom necktie index, between 11 and 15.
+---@param def SrcHumanModelDef The male/female CMC names.
+---@return integer index The normalized accessory index.
+function src.registerHumanNecktie(index, def) end
+
+---Register a custom necklace model (CMC pair) at an accessory index and sync
+---it to all SRC clients.
+---@param index integer The custom necklace index, between 3 and 15.
+---@param def SrcHumanModelDef The male/female CMC names.
+---@return integer index The normalized accessory index.
+function src.registerHumanNecklace(index, def) end
+
+---Delete a world block on the server and sync the deletion to SRC clients.
+---@param x integer The block X coordinate.
+---@param y integer The block Y coordinate.
+---@param z integer The block Z coordinate.
+---@return boolean deleted False when the block was already empty.
+function src.deleteBlock(x, y, z) end
+
 ---Get the SRC connection state of a player's client.
 ---@param player Player The player to query.
 ---@return SrcClientState state The client state snapshot.
@@ -172,7 +197,7 @@ function itemTypes.clone(sourceRef, targetIndex, overrides) end
 ---@param mass number In kilograms, kind of.
 ---@param acceleration number How fast the vehicle can accelerate.
 ---@param model string The client-side model name, resolved from the synced assets.
----@param numSeats integer The number of seats, 0-4.
+---@param numSeats integer The number of seats, 0-8.
 ---@param seatPos SrcSeatPosition[] One position per seat.
 ---@param audio string The engine audio reference name.
 ---@param wheelRadius? number The wheel radius. Defaults to the runtime default.

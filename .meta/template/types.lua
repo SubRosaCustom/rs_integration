@@ -86,7 +86,7 @@ end
 ---@field size integer The file size in bytes.
 ---@field sha256 string The hex SHA-256 of the file contents.
 ---@field mtime number The file's last modification time.
----@field sourcePath string The server-side path the file was read from.
+---@field source_path string The server-side path the file was read from.
 ---@field kind string "script" or "asset".
 
 ---Snapshot of a player's SRC client connection state, returned by
@@ -95,6 +95,8 @@ end
 ---@field enabled boolean Whether the SRC runtime is enabled on the server.
 ---@field connected boolean Whether the player has an open, bound SRC connection.
 ---@field hello boolean Whether the client completed the SRC hello handshake.
+---@field syncState string The current sync state, or "disconnected".
+---@field ready boolean Whether the client completed the current sync generation.
 ---@field scriptCount integer How many script files are in the sync index.
 ---@field assetFileCount integer How many asset files are in the sync index.
 ---@field loadedLevel string The level name the sync index was built for.
@@ -140,7 +142,7 @@ end
 ---@field mass number?
 ---@field acceleration number?
 ---@field model string? The client-side model name.
----@field numSeats integer? The number of seats, 0-4.
+---@field numSeats integer? The number of seats, 0-8.
 ---@field seatPos SrcSeatPosition[]? One position per seat.
 ---@field audio string? The engine audio reference name.
 ---@field wheelRadius number?

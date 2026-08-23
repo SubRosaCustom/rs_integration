@@ -331,6 +331,25 @@ plugin.commands["/srcdisableplugin"] = {
 	end,
 }
 
+plugin.commands["/srcreloadplugin"] = {
+	info = "Reload a synced client plugin for all SRC clients.",
+	usage = "<plugin>",
+	autoComplete = auto_complete_client_plugin_arg,
+	canCall = function(ply)
+		return ply.isConsole or ply.isAdmin
+	end,
+	call = function(ply, _, args)
+		assert(src.enabled, "SRC is disabled")
+		assert(#args >= 1, "usage")
+
+		local plugin_name = args[1]
+		assert(has_client_plugin(plugin_name), "Invalid client plugin")
+
+		src.reloadClientPlugin(plugin_name)
+		message_player(ply, string.format("Reloading SRC client plugin %s", plugin_name))
+	end,
+}
+
 plugin.commands["/srcdumpstate"] = {
 	info = "Dump a compact SRC internal state snapshot.",
 	canCall = function(ply)
