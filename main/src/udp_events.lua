@@ -423,7 +423,8 @@ local function find_client_for_datagram(state, token, address)
 	for connection, client in pairs(state.clients) do
 		if client
 			and client.udp_token == token
-			and tostring(connection.address) == tostring(address) then
+			-- and tostring(connection.address) == tostring(address)
+		then
 			return connection, client
 		end
 	end

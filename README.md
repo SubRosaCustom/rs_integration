@@ -31,7 +31,7 @@ This repository is the server half of SRC. It is not the native client mod, and 
 - SRC uses TCP for control/sync and sends standalone batched event datagrams
   through the game's existing UDP socket and port.
 - Server-owned reliable event IDs are allocated in the unsigned range `0x80000000` to `0xFFFFFFFF` to avoid client/server ID collisions.
-- `plugins/srcutils.lua` exposes `/srcwatch`, `/srcdisableplugin`, `/srcenableplugin`, and supports `srcwatch` as an alias.
+- `plugins/srcutils.lua` exposes `/srcwatch`, `/srcdisableplugin`, `/srcenableplugin`, `/srcreloadplugin`, and supports `srcwatch` as an alias.
 - Internal Lua helpers in this repo are now normalized to `snake_case`; API-facing names are preserved for compatibility with existing configs/plugins.
 - The native helper libraries now load as two separate Lua modules: `librosaserver_src_integration` and `libminiz`.
 
@@ -45,7 +45,7 @@ This repository is the server half of SRC. It is not the native client mod, and 
 - `main/src/sync_snapshot.lua` builds synchronized file and bundle snapshots
 - `main/src/item_types.lua` owns custom item type sync helpers
 - `main/src/watcher.lua` owns the watcher helper used by SRC utility plugins
-- `plugins/srcutils.lua` owns `/srcrefresh`, `/srcstatus`, `/srcclients`, `/srcwatch`, `/srcdisableplugin`, `/srcenableplugin`, `/srcdumpstate`, and `/srckicknonsrc`
+- `plugins/srcutils.lua` owns `/srcrefresh`, `/srcstatus`, `/srcclients`, `/srcwatch`, `/srcdisableplugin`, `/srcenableplugin`, `/srcreloadplugin`, `/srcdumpstate`, and `/srckicknonsrc`
 - `plugins/srccShowcase.lua` is an example server plugin
 
 ## Testing

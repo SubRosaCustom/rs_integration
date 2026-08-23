@@ -2,12 +2,13 @@ local log = require("main.src.log")
 
 local M = {}
 
-local PROTOCOL_VERSION = 1
+local PROTOCOL_VERSION = 2
 local MAX_VEHICLE_TYPE_COUNT = 128
 local MAX_VEHICLE_TYPE_INDEX = MAX_VEHICLE_TYPE_COUNT - 1
 local FIRST_CUSTOM_INDEX = 17
 local VEHICLE_TYPE_SIZE = 0x185C0
 local SERVER_VEHICLE_TYPES_OFFSET = 0x4d03560
+local MAX_SEATS = 8
 
 local OFFSET_USES_EXTERNAL_MODEL = 0x0
 local OFFSET_CONTROLLABLE_STATE = 0x8
@@ -172,7 +173,7 @@ local function normalize_seat_positions(seat_count, seat_positions)
 	assert(type(seat_positions) == "table", "vehicleTypes.new: seatPos must be a table")
 
 	local normalized = {}
-	for i = 1, 4 do
+	for i = 1, MAX_SEATS do
 		local raw = seat_positions[i]
 		if i <= seat_count then
 			assert(raw ~= nil, "vehicleTypes.new: missing seatPos[" .. i .. "]")
@@ -187,7 +188,7 @@ end
 
 local function read_seat_positions(address)
 	local seat_positions = {}
-	for i = 0, 3 do
+	for i = 0, MAX_SEATS - 1 do
 		local base = address + OFFSET_SEAT_POS + (i * VECTOR_SIZE)
 		seat_positions[i + 1] = {
 			x = memory.readFloat(base),
@@ -199,7 +200,7 @@ local function read_seat_positions(address)
 end
 
 local function write_seat_positions(address, seat_positions)
-	for i = 0, 3 do
+	for i = 0, MAX_SEATS - 1 do
 		local base = address + OFFSET_SEAT_POS + (i * VECTOR_SIZE)
 		local value = seat_positions[i + 1] or { x = 0, y = 0, z = 0 }
 		memory.writeFloat(base, value.x or 0)
@@ -323,7 +324,8 @@ local function build_definition(name, controllable_state, uses_external_model, p
 	assert(type(seat_count) == "number", "vehicleTypes.new: numSeats must be a number")
 
 	local normalized_seat_count = math.floor(seat_count)
-	assert(normalized_seat_count >= 0 and normalized_seat_count <= 4, "vehicleTypes.new: numSeats must be in range 0..4")
+	assert(normalized_seat_count >= 0 and normalized_seat_count <= MAX_SEATS,
+		string.format("vehicleTypes.new: numSeats must be in range 0..%d", MAX_SEATS))
 
 	return {
 		index = index,
