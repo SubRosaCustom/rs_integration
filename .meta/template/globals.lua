@@ -37,7 +37,7 @@ function src.onClientEvent(name, fn) end
 function src.emitClientEvent(player, name, ...) end
 
 ---Reload a synced client plugin on all connected SRC clients.
----@param plugin_name string
+---@param plugin_name string The plugin file name.
 function src.reloadClientPlugin(plugin_name) end
 
 ---Send a custom item type sync payload to clients.

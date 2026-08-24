@@ -74,24 +74,24 @@ local function write_disabled_plugins(names)
 	file:close()
 end
 
-local function collect_client_plugin_names()
-	local plugins_root = sync_paths.join(scripts_root(), "plugins")
-	local ok, entries = pcall(os.listDirectory, plugins_root)
-	if not ok or type(entries) ~= "table" then
-		return {}
-	end
-
+local function collect_client_runtime_names()
 	local names = {}
-	for _, entry in ipairs(entries) do
-		if entry.isDirectory then
-			local init_path = sync_paths.join(sync_paths.join(plugins_root, entry.name), "init.lua")
-			if sync_paths.read_file(init_path) then
-				names[entry.name] = true
-			end
-		else
-			local stem = entry.name:match("^(.+)%.lua$")
-			if stem and stem ~= "init" then
-				names[stem] = true
+	for _, name_space in ipairs({ "plugins", "modes" }) do
+		local root = sync_paths.join(scripts_root(), name_space)
+		local ok, entries = pcall(os.listDirectory, root)
+		if ok and type(entries) == "table" then
+			for _, entry in ipairs(entries) do
+				if entry.isDirectory then
+					local init_path = sync_paths.join(sync_paths.join(root, entry.name), "init.lua")
+					if sync_paths.read_file(init_path) then
+						names[entry.name] = true
+					end
+				else
+					local stem = entry.name:match("^(.+)%.lua$")
+					if stem and stem ~= "init" then
+						names[stem] = true
+					end
+				end
 			end
 		end
 	end
@@ -104,8 +104,8 @@ local function collect_client_plugin_names()
 	return sorted
 end
 
-local function has_client_plugin(name)
-	local names = collect_client_plugin_names()
+local function has_client_runtime(name)
+	local names = collect_client_runtime_names()
 	for i = 1, #names do
 		if names[i] == name then
 			return true
@@ -114,13 +114,13 @@ local function has_client_plugin(name)
 	return false
 end
 
-local function auto_complete_client_plugin_arg(args)
+local function auto_complete_client_runtime_arg(args)
 	if #args < 1 then
 		return
 	end
 
 	local beginning = string.lower(args[1])
-	local names = collect_client_plugin_names()
+	local names = collect_client_runtime_names()
 	for i = 1, #names do
 		local name = names[i]
 		if string.lower(name):sub(1, #beginning) == beginning then
@@ -334,7 +334,7 @@ plugin.commands["/srcdisableplugin"] = {
 plugin.commands["/srcreloadplugin"] = {
 	info = "Reload a synced client plugin for all SRC clients.",
 	usage = "<plugin>",
-	autoComplete = auto_complete_client_plugin_arg,
+	autoComplete = auto_complete_client_runtime_arg,
 	canCall = function(ply)
 		return ply.isConsole or ply.isAdmin
 	end,
@@ -343,7 +343,7 @@ plugin.commands["/srcreloadplugin"] = {
 		assert(#args >= 1, "usage")
 
 		local plugin_name = args[1]
-		assert(has_client_plugin(plugin_name), "Invalid client plugin")
+		assert(has_client_runtime(plugin_name), "Invalid client plugin")
 
 		src.reloadClientPlugin(plugin_name)
 		message_player(ply, string.format("Reloading SRC client plugin %s", plugin_name))

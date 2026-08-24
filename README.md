@@ -32,6 +32,7 @@ This repository is the server half of SRC. It is not the native client mod, and 
   through the game's existing UDP socket and port.
 - Server-owned reliable event IDs are allocated in the unsigned range `0x80000000` to `0xFFFFFFFF` to avoid client/server ID collisions.
 - `plugins/srcutils.lua` exposes `/srcwatch`, `/srcdisableplugin`, `/srcenableplugin`, `/srcreloadplugin`, and supports `srcwatch` as an alias.
+  `/srcreloadplugin` accepts a synced client plugin file name.
 - Internal Lua helpers in this repo are now normalized to `snake_case`; API-facing names are preserved for compatibility with existing configs/plugins.
 - The native helper libraries now load as two separate Lua modules: `librosaserver_src_integration` and `libminiz`.
 
