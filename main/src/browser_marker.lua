@@ -7,64 +7,7 @@ local PACKET_BIT_OFFSET_ADDRESS = 0x39075C80
 local PACKET_ADDRESS = 0x39075C84
 local MAX_PACKET_SIZE = 0x10000
 local MARKER = "SRCE"
-
-local function get_base_address()
-	local ok, value = pcall(memory.getBaseAddress)
-	if not ok or type(value) ~= "number" or value == 0 then
-		return nil
-	end
-	return math.floor(value)
-end
-
-local function resolve_address(offset)
-	local base_address = get_base_address()
-	if not base_address then
-		return nil
-	end
-	return base_address + offset
-end
-
-local function read_int(offset)
-	local address = resolve_address(offset)
-	if not address then
-		return nil
-	end
-	local ok, value = pcall(memory.readInt, address)
-	if not ok or type(value) ~= "number" then
-		return nil
-	end
-	return math.floor(value)
-end
-
-local function write_int(offset, value)
-	local address = resolve_address(offset)
-	if not address then
-		return false
-	end
-	local ok = pcall(memory.writeInt, address, math.floor(value))
-	return ok
-end
-
-local function read_bytes(offset, size)
-	local address = resolve_address(offset)
-	if not address then
-		return nil
-	end
-	local ok, value = pcall(memory.readBytes, address, size)
-	if not ok or type(value) ~= "string" then
-		return nil
-	end
-	return value
-end
-
-local function write_bytes(offset, value)
-	local address = resolve_address(offset)
-	if not address then
-		return false
-	end
-	local ok = pcall(memory.writeBytes, address, value)
-	return ok
-end
+local BASE_ADDRESS = memory.getBaseAddress()
 
 local function normalize_port(port)
 	local number_port = tonumber(port)
@@ -107,11 +50,11 @@ function M.on_send_packet(state, address, port)
 		return
 	end
 
-	local packet_size = read_int(PACKET_SIZE_ADDRESS)
+	local packet_size = memory.readInt(BASE_ADDRESS + PACKET_SIZE_ADDRESS)
 	if type(packet_size) ~= "number" or packet_size < 5 or packet_size >= MAX_PACKET_SIZE then
 		return
 	end
-	local packet_bit_offset = read_int(PACKET_BIT_OFFSET_ADDRESS)
+	local packet_bit_offset = memory.readInt(BASE_ADDRESS + PACKET_BIT_OFFSET_ADDRESS)
 	if type(packet_bit_offset) ~= "number" or packet_bit_offset < 0 then
 		packet_bit_offset = 0
 	end
@@ -120,7 +63,7 @@ function M.on_send_packet(state, address, port)
 		return
 	end
 
-	local header = read_bytes(PACKET_ADDRESS, 5)
+	local header = memory.readBytes(BASE_ADDRESS + PACKET_ADDRESS, 5)
 	if type(header) ~= "string" or #header ~= 5 or header:byte(5) ~= 1 then
 		return
 	end
@@ -130,22 +73,15 @@ function M.on_send_packet(state, address, port)
 		return
 	end
 
-	local original_tail = read_bytes(PACKET_ADDRESS + aligned_size, #trailer)
+	local original_tail = memory.readBytes(BASE_ADDRESS + PACKET_ADDRESS + aligned_size, #trailer)
 	if not original_tail or #original_tail ~= #trailer then
 		original_tail = string.rep("\0", #trailer)
 	end
 
-	if not write_bytes(PACKET_ADDRESS + aligned_size, trailer) then
-		return
-	end
-	if not write_int(PACKET_SIZE_ADDRESS, aligned_size + #trailer) then
-		write_bytes(PACKET_ADDRESS + aligned_size, original_tail)
-		return
-	end
-	if packet_bit_offset > 0 and not write_int(PACKET_BIT_OFFSET_ADDRESS, 0) then
-		write_bytes(PACKET_ADDRESS + aligned_size, original_tail)
-		write_int(PACKET_SIZE_ADDRESS, packet_size)
-		return
+	memory.writeBytes(BASE_ADDRESS + PACKET_ADDRESS + aligned_size, trailer)
+	memory.writeInt(BASE_ADDRESS + PACKET_SIZE_ADDRESS, aligned_size + #trailer)
+	if packet_bit_offset > 0 then
+		memory.writeInt(BASE_ADDRESS + PACKET_BIT_OFFSET_ADDRESS, 0)
 	end
 
 	state.browser_marker_mutation_stack = state.browser_marker_mutation_stack or {}
@@ -167,9 +103,9 @@ function M.on_post_send_packet(state)
 		return
 	end
 
-	write_bytes(PACKET_ADDRESS + mutation.aligned_size, mutation.original_tail)
-	write_int(PACKET_SIZE_ADDRESS, mutation.original_size)
-	write_int(PACKET_BIT_OFFSET_ADDRESS, mutation.original_bit_offset or 0)
+	memory.writeBytes(BASE_ADDRESS + PACKET_ADDRESS + mutation.aligned_size, mutation.original_tail)
+	memory.writeInt(BASE_ADDRESS + PACKET_SIZE_ADDRESS, mutation.original_size)
+	memory.writeInt(BASE_ADDRESS + PACKET_BIT_OFFSET_ADDRESS, mutation.original_bit_offset or 0)
 end
 
 return M
