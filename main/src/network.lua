@@ -9,6 +9,7 @@ local threaded_tcp_codec = require("main.src.threaded_tcp_codec")
 local threaded_tcp_server = require("main.src.threaded_tcp_server")
 local udp_events = require("main.src.udp_events")
 local world_mutations = require("main.src.world_mutations")
+local has_miniz_integration = pcall(require, "libminiz")
 
 local M = {}
 local HEARTBEAT_TIMEOUT_SECONDS = 60
@@ -569,13 +570,81 @@ local function queue_sync_file(state, connection, relative_path)
 	table.insert(client.pending_file_requests, relative_path)
 end
 
-local function queue_sync_bundle(state, connection, bundle_id)
+local function build_partial_bundle(state, bundle_id, paths)
+	if not has_miniz_integration or type(miniz) ~= "table"
+		or type(miniz.createZip) ~= "function" then
+		return nil, "ZIP integration is unavailable"
+	end
+	if type(paths) ~= "table" or #paths == 0 or #paths > #state.scripts + #state.asset_files then
+		return nil, "invalid partial bundle path list"
+	end
+	local expected_id = "partial-" .. crypto.sha256(
+		state.manifest_hash .. table.concat(paths, "\n") .. "\n"
+	):sub(1, 16)
+	if bundle_id ~= expected_id then
+		return nil, "invalid partial bundle id"
+	end
+
+	local archive_inputs = {}
+	local files = {}
+	local seen = {}
+	for i = 1, #paths do
+		local path = paths[i]
+		local record = type(path) == "string" and
+			(state.scripts_by_path[path] or state.asset_files_by_path[path]) or nil
+		if not record or seen[path] then
+			return nil, "invalid partial bundle path"
+		end
+
+		local bytes = sync_paths.read_file(record.source_path)
+		if not bytes or #bytes ~= record.size or crypto.sha256(bytes) ~= record.sha256 then
+			return nil, "partial bundle source changed during sync"
+		end
+
+		seen[path] = true
+		archive_inputs[path] = bytes
+		files[#files + 1] = record
+	end
+
+	local ok, archive = pcall(miniz.createZip, archive_inputs)
+	if not ok or type(archive) ~= "string" or archive == "" then
+		return nil, "failed to create partial ZIP"
+	end
+	return {
+		id = bundle_id,
+		kind = "partial",
+		archive = archive,
+		size = #archive,
+		archive_sha256 = crypto.sha256(archive),
+		files = files,
+	}
+end
+
+local function queue_sync_bundle(state, connection, bundle_id, paths)
 	local client = state.clients[connection]
 	if not client or type(bundle_id) ~= "string" or bundle_id == "" then
 		return
 	end
 
 	local bundle = state.sync_bundles_by_id and state.sync_bundles_by_id[bundle_id] or nil
+	if type(paths) == "table" then
+		if bundle_id:sub(1, 8) ~= "partial-" then
+			bundle = nil
+		else
+			local error_message = nil
+			bundle, error_message = build_partial_bundle(state, bundle_id, paths)
+			if not bundle then
+				enqueue_frame(state, connection, "ERROR_REPORT", { error = error_message })
+				return
+			end
+			state.sync_bundles_by_id[bundle_id] = bundle
+			enqueue_frame(state, connection, "BUNDLE_BEGIN", {
+				id = bundle.id,
+				size = bundle.size,
+				archiveSha256 = bundle.archive_sha256,
+			})
+		end
+	end
 	if not bundle or type(bundle.archive) ~= "string" or bundle.archive == "" then
 		enqueue_frame(state, connection, "ERROR_REPORT", {
 			error = "invalid BUNDLE_REQ id",
@@ -731,6 +800,9 @@ end
 local function pump_bundle_transfer(state, connection)
 	local client = state.clients[connection]
 	if not client or not connection.is_open then
+		return
+	end
+	if #client.send_queue > 0 or connection.pending_send_bytes > 0 then
 		return
 	end
 
@@ -1482,7 +1554,7 @@ end
 
 local function handle_bundle_request(state, connection, payload)
 	if require_hello(state, connection, "BUNDLE_REQ") then
-		queue_sync_bundle(state, connection, payload.id)
+		queue_sync_bundle(state, connection, payload.id, payload.paths)
 	end
 end
 

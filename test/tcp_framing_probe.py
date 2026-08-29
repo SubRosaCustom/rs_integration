@@ -8,7 +8,7 @@ import time
 
 SERVER = ("127.0.0.1", 27070)
 DEADLINE_SECONDS = 15
-PING = b'{"type":"SRC_PING","payload":{"protocol":5}}\n'
+PING = b'{"type":"SRC_PING","payload":{"protocol":6}}\n'
 
 
 deadline = time.monotonic() + DEADLINE_SECONDS
