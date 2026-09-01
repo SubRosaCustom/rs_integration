@@ -220,7 +220,7 @@ if not state.hooks_registered then
 		if ok and type(endpoint) == "table" then
 			local key = tostring(endpoint.address) .. ":" .. tostring(endpoint.port)
 			state.src_admission_rejections[key] = {
-				message = "SRC is required to play on this server.",
+				message = "SRC is required to play. subrosacustom.github.io",
 				expires = os.realClock() + 10,
 			}
 		end
