@@ -1463,6 +1463,8 @@ local function handle_ping(state, connection, payload)
 	end
 	enqueue_frame(state, connection, "SRC_PONG", {
 		protocol = protocol.VERSION,
+		motd = state.config.motd,
+		motdIcon = state.config.motdIconData,
 	})
 end
 
