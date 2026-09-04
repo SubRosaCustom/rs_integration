@@ -572,7 +572,7 @@ end
 
 local function build_partial_bundle(state, bundle_id, paths)
 	if not has_miniz_integration or type(miniz) ~= "table"
-		or type(miniz.createZip) ~= "function" then
+		or type(miniz.createZip) ~= "function" or type(miniz.extractZip) ~= "function" then
 		return nil, "ZIP integration is unavailable"
 	end
 	if type(paths) ~= "table" or #paths == 0 or #paths > #state.scripts + #state.asset_files then
@@ -583,6 +583,17 @@ local function build_partial_bundle(state, bundle_id, paths)
 	):sub(1, 16)
 	if bundle_id ~= expected_id then
 		return nil, "invalid partial bundle id"
+	end
+
+	local snapshot_inputs = {}
+	for _, source_bundle in ipairs(state.sync_bundles) do
+		local ok, extracted = pcall(miniz.extractZip, source_bundle.archive)
+		if not ok or type(extracted) ~= "table" then
+			return nil, "failed to read sync snapshot"
+		end
+		for path, bytes in pairs(extracted) do
+			snapshot_inputs[path] = bytes
+		end
 	end
 
 	local archive_inputs = {}
@@ -596,9 +607,9 @@ local function build_partial_bundle(state, bundle_id, paths)
 			return nil, "invalid partial bundle path"
 		end
 
-		local bytes = sync_paths.read_file(record.source_path)
+		local bytes = snapshot_inputs[path]
 		if not bytes or #bytes ~= record.size or crypto.sha256(bytes) ~= record.sha256 then
-			return nil, "partial bundle source changed during sync"
+			return nil, "partial bundle snapshot is inconsistent"
 		end
 
 		seen[path] = true
