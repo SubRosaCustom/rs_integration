@@ -1,5 +1,5 @@
 local M = {
-	VERSION = 6,
+	VERSION = 7,
 }
 
 return M

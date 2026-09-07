@@ -29,7 +29,7 @@ return function()
 		for _, response in ipairs(responses) do
 			assert(response.type == "SRC_PONG")
 			assert(type(response.payload) == "table")
-			assert(response.payload.protocol == 6)
+			assert(response.payload.protocol == 7)
 		end
 	end
 
