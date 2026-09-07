@@ -63,6 +63,8 @@ Common settings include:
 - `enabled`
 - `clientRoot`
 - `disallowNonSRCPlayers`
+- `motd` (up to 160 bytes, rendered with the base game's single-byte font atlas when an SRC server is hovered)
+- `motdIcon` (path to an exact 32x32 PNG smaller than 5 KiB; relative paths use the server's working directory)
 - file transfer limits
 - queue limits
 - auto-refresh settings

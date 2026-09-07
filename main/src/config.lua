@@ -1,9 +1,55 @@
 local M = {}
 
+local BASE64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+
+local function encode_base64(bytes)
+	local encoded = (bytes:gsub(".", function(character)
+		local value = character:byte()
+		local bits = ""
+		for index = 8, 1, -1 do
+			bits = bits .. (value % 2 ^ index - value % 2 ^ (index - 1) > 0 and "1" or "0")
+		end
+		return bits
+	end) .. "0000"):gsub("%d%d%d?%d?%d?%d?", function(bits)
+		if #bits < 6 then
+			return ""
+		end
+		local value = 0
+		for index = 1, 6 do
+			value = value + (bits:sub(index, index) == "1" and 2 ^ (6 - index) or 0)
+		end
+		return BASE64_ALPHABET:sub(value + 1, value + 1)
+	end)
+	return encoded .. ({ "", "==", "=" })[#bytes % 3 + 1]
+end
+
+local function load_motd_icon(path)
+	if path == "" then
+		return ""
+	end
+	local file = io.open(path, "rb")
+	if not file then
+		return ""
+	end
+	local bytes = file:read("*a")
+	file:close()
+	if #bytes >= 5 * 1024 or #bytes < 24 or bytes:sub(1, 8) ~= "\137PNG\r\n\26\n" then
+		return ""
+	end
+	local width, height = string.unpack(">I4I4", bytes, 17)
+	if width ~= 32 or height ~= 32 then
+		return ""
+	end
+	return encode_base64(bytes)
+end
+
 M.DEFAULTS = {
 	enabled = true,
 	disallowNonSRCPlayers = false,
 	clientRoot = "subrosacustom",
+	motd = "",
+	motdIcon = "",
+	motdIconData = "",
 	readSize = 16384,
 	fileChunkSize = 65536,
 	maxReadBytesPerTick = 262144,
@@ -57,6 +103,15 @@ function M.resolve(raw)
 	if type(raw.clientRoot) == "string" and raw.clientRoot ~= "" then
 		resolved.clientRoot = raw.clientRoot
 	end
+
+	if type(raw.motd) == "string" then
+		resolved.motd = raw.motd:sub(1, 160)
+	end
+
+	if type(raw.motdIcon) == "string" then
+		resolved.motdIcon = raw.motdIcon
+	end
+	resolved.motdIconData = load_motd_icon(resolved.motdIcon)
 
 	resolved.readSize = normalize_number(raw.readSize, resolved.readSize, 1024)
 	resolved.fileChunkSize = normalize_number(raw.fileChunkSize, resolved.fileChunkSize, 256)
