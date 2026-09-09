@@ -1,3 +1,5 @@
+local log = require("main.src.log")
+
 local M = {}
 
 local BASE64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
@@ -105,6 +107,9 @@ function M.resolve(raw)
 	end
 
 	if type(raw.motd) == "string" then
+		if #raw.motd > 160 then
+			log.warn("motd exceeds 160 chars")
+		end
 		resolved.motd = raw.motd:sub(1, 160)
 	end
 
