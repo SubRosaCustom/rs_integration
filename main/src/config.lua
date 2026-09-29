@@ -136,7 +136,7 @@ function M.resolve(raw)
 		resolved.eventRetryMaxAttempts,
 		1
 	)
-	resolved.maxEventBytes = normalize_number(raw.maxEventBytes, resolved.maxEventBytes, 1024)
+	resolved.maxEventBytes = math.floor(math.min(262144, normalize_number(raw.maxEventBytes, resolved.maxEventBytes, 1024)))
 	resolved.eventProcessTimeoutTicks = normalize_number(
 		raw.eventProcessTimeoutTicks,
 		resolved.eventProcessTimeoutTicks,

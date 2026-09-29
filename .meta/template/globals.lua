@@ -29,6 +29,11 @@ function src.refreshSyncFiles() end
 function src.onClientEvent(name, fn) end
 
 ---Emit a server-to-client SRC event.
+---The server maxEventBytes setting may lower the 256 KiB limit.
+---Protocol 8 fragments and retries events over UDP. Delivery is unordered.
+---The complete encoded argument block is limited to 256 KiB, including serialization overhead.
+---Queue acceptance does not guarantee remote processing.
+---Disconnects discard pending events; they are not replayed into a new session.
 ---Arguments may be nil, boolean, number, string or src.blob() values.
 ---@param player Player|nil The target player, or nil to broadcast to all SRC clients.
 ---@param name string The event name.

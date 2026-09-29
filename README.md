@@ -28,8 +28,10 @@ This repository is the server half of SRC. It is not the native client mod, and 
 
 ## Runtime Notes
 
-- SRC uses TCP for control/sync and sends standalone batched event datagrams
-  through the game's existing UDP socket and port.
+- SRC uses TCP for control/sync and reliable fragmented event datagrams through
+  the game's existing UDP socket and port. Protocol 8 supports up to 256 KiB of
+  encoded event arguments, selective retries and packet-size fallback. Both
+  client and server must upgrade together. See [the wire format and limits](docs/reliable_udp.md).
 - Server-owned reliable event IDs are allocated in the unsigned range `0x80000000` to `0xFFFFFFFF` to avoid client/server ID collisions.
 - `plugins/srcutils.lua` exposes `/srcwatch`, `/srcdisableplugin`, `/srcenableplugin`, `/srcreloadplugin`, and supports `srcwatch` as an alias.
   `/srcreloadplugin` accepts a synced client plugin file name.
