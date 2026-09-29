@@ -321,6 +321,7 @@ local function reset_client_sync_state(connection, client, preserve_udp_state)
 	client.ready_manifest_hash = nil
 	if preserve_udp_state then
 		client.udp_events_ready = false
+		udp_events.tick(client)
 	else
 		client.pending_events = {}
 		client.pending_results = {}
@@ -921,32 +922,33 @@ local function queue_reliable_udp_event(state, connection, name, event_hash, arg
 		argument_bytes = encoded
 	end
 
+	if state.next_event_id > SERVER_EVENT_ID_MAX then
+		log.warn("server event ID space exhausted; restart required")
+		return false
+	end
 	local message_id = state.next_event_id
 	local bytes, encode_error = udp_events.encode_reliable_event(event_hash, message_id, argument_bytes)
 	if not bytes then
 		log.warn("failed to encode UDP event (%s): %s", name, tostring(encode_error))
 		return false
 	end
-	if #bytes > state.config.maxEventBytes then
+	if #bytes - 18 > math.min(262144, state.config.maxEventBytes) then
 		log.warn("event too large; dropping (%s)", name)
 		return false
 	end
 
 	state.next_event_id = state.next_event_id + 1
-	if state.next_event_id > SERVER_EVENT_ID_MAX then
-		state.next_event_id = SERVER_EVENT_ID_MIN
-	end
 
-	udp_events.enqueue(client, bytes)
+	if not udp_events.enqueue(client, bytes) then
+		log.warn("UDP event queue budget exhausted (%s)", name)
+		return false
+	end
 
 	client.pending_events[message_id] = {
 		bytes = bytes,
-		attempts = 1,
-		next_retry_tick = state.tick + state.config.eventRetryBaseTicks,
 		name = name,
 		event_hash = event_hash,
 		created_tick = state.tick,
-		last_retry_tick = state.tick,
 	}
 
 	return true
@@ -988,22 +990,22 @@ local function queue_reliable_udp_result(state, connection, name, message_id, ev
 		log.warn("failed to encode UDP result (%s): %s", name, tostring(encode_error))
 		return false
 	end
-	if #bytes > state.config.maxEventBytes then
+	if #bytes - 18 > math.min(262144, state.config.maxEventBytes) then
 		log.warn("result too large; dropping (%s)", name)
 		return false
 	end
 
-	udp_events.enqueue(client, bytes)
+	if not udp_events.enqueue(client, bytes) then
+		log.warn("UDP result queue budget exhausted (%s)", name)
+		return false
+	end
 
 	client.pending_results = client.pending_results or {}
 	client.pending_results[normalized_message_id] = {
 		bytes = bytes,
-		attempts = 1,
-		next_retry_tick = state.tick + state.config.eventRetryBaseTicks,
 		name = name,
 		event_hash = event_hash,
 		created_tick = state.tick,
-		last_retry_tick = state.tick,
 	}
 
 	return true
@@ -1032,7 +1034,8 @@ local function handle_reliable_event_ack_batch_payload(state, connection, messag
 						name = pending.name,
 						event_hash = pending.event_hash,
 						acked_tick = state.tick,
-						deadline_tick = state.tick + state.config.eventProcessTimeoutTicks,
+						-- Allow the 120-second transport deadline for a fragmented result.
+						deadline_tick = state.tick + state.config.eventProcessTimeoutTicks + 7200,
 					}
 
 					local early = client.early_results[message_id]
@@ -1527,6 +1530,7 @@ local function handle_hello(state, connection, payload)
 		protocol = protocol.VERSION,
 		port = server.port,
 		udpToken = udp_token,
+		maxEventBytes = state.config.maxEventBytes,
 		runtimeID = state.runtime_id,
 		syncGeneration = state.sync_generation,
 		manifestHash = state.manifest_hash,
@@ -1607,17 +1611,10 @@ local function handle_udp_ready(state, connection)
 		return
 	end
 
-	local retry_tick = state.tick + state.config.eventRetryBaseTicks
 	local completion_expiry =
 		state.tick + math.max(120, tonumber(state.config.eventProcessTimeoutTicks) or 180)
-	for _, pending in pairs(client.pending_events or {}) do
-		pending.next_retry_tick = retry_tick
-	end
-	for _, pending in pairs(client.pending_results or {}) do
-		pending.next_retry_tick = retry_tick
-	end
 	for _, pending in pairs(client.awaiting_results or {}) do
-		pending.deadline_tick = state.tick + state.config.eventProcessTimeoutTicks
+		pending.deadline_tick = state.tick + state.config.eventProcessTimeoutTicks + 7200
 	end
 	for message_id in pairs(client.recent_completed or {}) do
 		client.recent_completed[message_id] = completion_expiry
@@ -1724,62 +1721,21 @@ end
 
 local function process_pending_retries(state, connection)
 	local client = state.clients[connection]
-	if not client or client.udp_events_ready ~= true then
+	if not client then return end
+	local transport_error = udp_events.tick(client, state.config)
+	if transport_error then
+		log.warn("UDP transport failed (%s): %s", client_id(connection), transport_error)
+		connection:close()
 		return
 	end
+	if client.udp_events_ready ~= true then return end
 	ensure_event_tracking_tables(client)
 	cleanup_recent_completions(state, client)
-
-	local max_attempts = state.config.eventRetryMaxAttempts
-	local base_ticks = state.config.eventRetryBaseTicks
-
-	for message_id, pending in pairs(client.pending_events) do
-		if state.tick >= pending.next_retry_tick then
-			if pending.attempts >= max_attempts then
-				log.warn(
-					"event delivery failed [SERVER_NEVER_RECEIVED_IT]: name=%s id=%s client=%s attempts=%s",
-					pending.name or "?",
-					message_id,
-					client_id(connection),
-					pending.attempts
-				)
-				client.pending_events[message_id] = nil
-				client.early_results[message_id] = nil
-				mark_event_recently_completed(state, client, message_id)
-			else
-				pending.attempts = pending.attempts + 1
-				pending.next_retry_tick = state.tick + base_ticks * (2 ^ (pending.attempts - 1))
-				pending.last_retry_tick = state.tick
-				udp_events.enqueue(client, pending.bytes)
-			end
-		end
-	end
-
-	for message_id, pending in pairs(client.pending_results) do
-		if state.tick >= pending.next_retry_tick then
-			if pending.attempts >= max_attempts then
-				log.warn(
-					"result delivery failed [SERVER_NEVER_RECEIVED_IT]: name=%s id=%s client=%s attempts=%s",
-					pending.name or "?",
-					message_id,
-					client_id(connection),
-					pending.attempts
-				)
-				client.pending_results[message_id] = nil
-				mark_event_recently_completed(state, client, message_id)
-			else
-				pending.attempts = pending.attempts + 1
-				pending.next_retry_tick = state.tick + base_ticks * (2 ^ (pending.attempts - 1))
-				pending.last_retry_tick = state.tick
-				udp_events.enqueue(client, pending.bytes)
-			end
-		end
-	end
 
 	for message_id, pending in pairs(client.awaiting_results) do
 		if state.tick >= pending.deadline_tick then
 			log.warn(
-				"event processing timeout [SRC_OR_SRCC_NEVER_PROCESSED_IT]: name=%s id=%s client=%s (acked transport, no process result)",
+				"event result timeout: name=%s id=%s client=%s (receipt confirmed; processing status uncertain)",
 				pending.name or "?",
 				message_id,
 				client_id(connection)
@@ -2427,9 +2383,8 @@ function M.on_udp_datagram(state, decoded)
 			return
 		end
 
-		if message.kind == 1 then
+		if message.kind == 1 and udp_events.accept(client, message) then
 			ensure_event_tracking_tables(client)
-			udp_events.queue_ack(client, message.message_id)
 			local pending_result = client.pending_results[message.message_id]
 			if pending_result then
 				udp_events.enqueue(client, pending_result.bytes)
@@ -2456,6 +2411,7 @@ function M.on_udp_datagram(state, decoded)
 							message.message_id,
 							client_id(connection)
 						)
+						connection:close()
 					end
 				else
 					log.warn(
@@ -2463,11 +2419,12 @@ function M.on_udp_datagram(state, decoded)
 						result.event_name or udp_events.format_event_hash(message.event_hash),
 						tostring(encode_error)
 					)
+					connection:close()
 				end
 			end
 		elseif message.kind == 2 then
 			handle_reliable_event_ack_batch_payload(state, connection, message.message_ids)
-		elseif message.kind == 3 then
+		elseif message.kind == 3 and udp_events.accept(client, message) then
 			handle_reliable_event_result_payload(state, connection, message)
 		end
 	end

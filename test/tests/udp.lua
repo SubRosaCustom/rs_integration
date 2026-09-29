@@ -72,6 +72,8 @@ return function(state, src)
 		},
 	}
 	state.clients[connection] = client
+	udp_events.tick(client, state.config)
+	local udp_reliable = client.udp_reliable
 
 	local reset_client = {
 		udp_token = token,
@@ -98,6 +100,7 @@ return function(state, src)
 	assert(client.udp_pending_ack_set == udp_pending_ack_set)
 	assert(client.udp_token == token)
 	assert(not client.udp_events_ready)
+	assert(client.udp_reliable == udp_reliable and not udp_reliable.active)
 	client.udp_events_ready = true
 
 	local handled = 0
@@ -110,8 +113,8 @@ return function(state, src)
 	local event_hash = assert(udp_events.hash_event_name("test.loopback"))
 	local args = assert(event_codec.encode_args("payload"))
 	local message = assert(udp_events.encode_reliable_event(event_hash, 7, args))
-	local batch = string.pack(">BBI2I4", 1, 0, 1, #message) .. message
-	local datagram = string.pack(">c4c4BBc32I2", "7DFP", "SRCU", 1, 0, token, #batch) .. batch
+	local batch = string.pack(">BBI4I2I4I2I2", 1, 1, 7, 1, #message, 488, 0) .. message
+	local datagram = string.pack(">c4c4BBc32I2", "7DFP", "SRCU", 2, 0, token, #batch) .. batch
 
 	local attempts = 0
 	local function wait_for_probe()
@@ -145,28 +148,17 @@ return function(state, src)
 			string.unpack(">c4c4BBc32I2", outbound)
 		assert(game_magic == "7DFP")
 		assert(magic == "SRCU")
-		assert(version == 1 and flags == 0)
+		assert(version == 2 and flags == 0)
 		assert(outbound_token == token)
 		assert(batch_size == #outbound - 44)
 		assert(#outbound <= 1200)
 
-		local batch_version, _, message_count, message_position =
-			string.unpack(">BBI2", outbound, batch_position)
-		assert(batch_version == 1)
-		assert(message_count >= 2)
-
-		local message_kinds = {}
-		for _ = 1, message_count do
-			local message_size
-			message_size, message_position = string.unpack(">I4", outbound, message_position)
-			message_kinds[outbound:byte(message_position)] = true
-			message_position = message_position + message_size
-		end
-		assert(message_kinds[2])
-		assert(message_kinds[3])
+		local packet_type, kind, id, generation, count, complete, bitmap =
+			string.unpack(">BBI4I2I2BB", outbound, batch_position)
+		assert(packet_type == 2 and kind == 1 and id == 7)
+		assert(generation == 1 and count == 1 and complete == 1 and bitmap == 1)
 		assert(client.pending_results[7])
-		assert(#client.udp_pending_ack_order == 0)
-		assert(#client.udp_send_queue == 0)
+		assert(client.udp_reliable)
 
 		client.player.connection = nil
 		network.on_udp_datagram(state, {
