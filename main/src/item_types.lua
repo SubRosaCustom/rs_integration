@@ -236,10 +236,6 @@ function M.build_sync_payload(state)
 		return (a.index or 0) < (b.index or 0)
 	end)
 
-	if #item_type_entries == 0 then
-		return nil
-	end
-
 	local metadata = {}
 	local chunks = {}
 	for i = 1, #item_type_entries do
@@ -274,11 +270,11 @@ local function emit_sync_payload(src, payload, player)
 		return false
 	end
 
-	if type(payload.itemTypes) ~= "table" or #payload.itemTypes == 0 then
+	if type(payload.itemTypes) ~= "table" then
 		return false
 	end
 
-	if type(payload.binRaw) ~= "string" or payload.binRaw == "" then
+	if type(payload.binRaw) ~= "string" then
 		return false
 	end
 
@@ -584,6 +580,8 @@ function M.install(state, src, force)
 					assert(not player.isBot, "src.setItemTypeModel: player cannot be a bot")
 				end
 
+				state.item_type_itm_assignments[target_index] = nil
+				state.item_type_it3_assignments[target_index] = nil
 				state.item_type_model_assignments[target_index] = model_name
 				local network = require("main.src.network")
 				src.syncCustomItemTypes(player)
@@ -625,6 +623,8 @@ function M.install(state, src, force)
 
 				local sync_path, server_path = normalize_item_type_file(state, itm_path, ".itm", "ITM")
 				apply_native_item_type_file(state, target_index, server_path, "ITM")
+				state.item_type_model_assignments[target_index] = nil
+				state.item_type_it3_assignments[target_index] = nil
 				state.item_type_itm_assignments[target_index] = sync_path
 				local network = require("main.src.network")
 				src.syncCustomItemTypes(player)
@@ -645,6 +645,8 @@ function M.install(state, src, force)
 
 				local sync_path, server_path = normalize_item_type_file(state, it3_path, ".it3", "IT3")
 				apply_native_item_type_file(state, target_index, server_path, "IT3")
+				state.item_type_model_assignments[target_index] = nil
+				state.item_type_itm_assignments[target_index] = nil
 				state.item_type_it3_assignments[target_index] = sync_path
 				local network = require("main.src.network")
 				src.syncCustomItemTypes(player)

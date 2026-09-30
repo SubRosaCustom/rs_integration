@@ -1,4 +1,6 @@
 local codec = require("main.src.threaded_tcp_codec")
+local json = require("main.json")
+require("libminiz")
 
 local READ_SIZE = 16384
 local SEND_BUDGET = 1024 * 1024
@@ -13,6 +15,7 @@ local STATS_INTERVAL_SECONDS = 1
 local tcp_server
 local connections = {}
 local bundle_cache = {}
+local snapshot = { manifest = "", files = {}, }
 local connection_count = 0
 local next_connection_id = 1
 
@@ -155,6 +158,53 @@ local function open_bundle_stream(connection, payload)
 	}
 end
 
+local function set_snapshot(payload)
+	local description = json.decode(payload)
+	local next_snapshot = { manifest = description.manifest, files = {}, }
+	local next_cache = {}
+	for _, bundle in ipairs(description.bundles) do
+		local archive = assert(bundle_cache[bundle.id], "snapshot bundle missing")
+		local extracted = miniz.extractZip(archive)
+		for _, record in ipairs(bundle.files) do
+			local bytes = extracted[record.path]
+			assert(type(bytes) == "string" and #bytes == record.size
+				and crypto.sha256(bytes) == record.sha256, "invalid snapshot file")
+			next_snapshot.files[record.path] = bytes
+		end
+		next_cache[bundle.id] = archive
+	end
+	-- Existing streams hold their own archive; expired snapshots can be released here.
+	bundle_cache = next_cache
+	snapshot = next_snapshot
+end
+
+local function start_partial(connection, payload)
+	local request = json.decode(payload)
+	assert(request.manifest == snapshot.manifest, "stale bundle request")
+	assert(type(request.paths) == "table" and #request.paths > 0, "invalid partial paths")
+	local inputs = {}
+	for _, path in ipairs(request.paths) do
+		assert(type(path) == "string" and not inputs[path], "invalid or duplicate partial path")
+		inputs[path] = assert(snapshot.files[path], "partial path not in snapshot")
+	end
+	local expected = "partial-" .. crypto.sha256(
+		snapshot.manifest .. table.concat(request.paths, "\n") .. "\n"
+	):sub(1, 16)
+	assert(request.id == expected, "invalid partial bundle id")
+	local archive = miniz.createZip(inputs)
+	assert(type(archive) == "string" and #archive > 0, "failed creating partial ZIP")
+	connection.send_queue[#connection.send_queue + 1] = {
+		bytes = json.encode({ type = "BUNDLE_BEGIN", payload = {
+			id = request.id, size = #archive, archiveSha256 = crypto.sha256(archive),
+		} }) .. "\n", offset = 1, main_owned = false,
+	}
+	close_stream(connection)
+	connection.stream = {
+		id = request.id, archive = archive, offset = 1,
+		end_frame = json.encode({ type = "BUNDLE_END", payload = { id = request.id, } }) .. "\n",
+	}
+end
+
 local function fill_stream_queue(connection)
 	while connection.stream and #connection.send_queue < STREAM_QUEUE_TARGET do
 		local stream = connection.stream
@@ -205,7 +255,25 @@ local function handle_command(command)
 		return
 	end
 
+	if command.kind == codec.SYNC_SNAPSHOT then
+		set_snapshot(command.payload)
+		return
+	end
+
 	local connection = connections[command.id]
+	if command.kind == codec.START_PARTIAL then
+		if connection then
+			local ok, failure = pcall(start_partial, connection, command.payload)
+			if not ok then
+				connection.send_queue[#connection.send_queue + 1] = {
+					bytes = json.encode({ type = "ERROR_REPORT", payload = {
+						error = tostring(failure),
+					} }) .. "\n", offset = 1, main_owned = false, stream_end = true,
+				}
+			end
+		end
+		return
+	end
 	if command.kind == codec.SEND then
 		if connection then
 			connection.send_queue[#connection.send_queue + 1] = {

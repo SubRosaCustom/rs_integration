@@ -388,10 +388,6 @@ function M.build_sync_payload(state)
 		return (a.index or 0) < (b.index or 0)
 	end)
 
-	if #entries == 0 then
-		return nil
-	end
-
 	return {
 		version = PROTOCOL_VERSION,
 		vehicleTypes = entries,
