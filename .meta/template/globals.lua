@@ -47,6 +47,7 @@ function src.reloadClientPlugin(plugin_name) end
 
 ---Send a custom item type sync payload to clients.
 ---Prefer src.syncCustomItemTypes, which builds the payload for you.
+---The payload replaces the complete custom item type list; an empty list clears it.
 ---@param player Player|nil The target player, or nil to broadcast.
 ---@param payload table The sync payload, as built by the runtime.
 ---@return integer|boolean sent The number of clients queued when broadcasting, or whether the frame was queued for a single player.
@@ -54,6 +55,7 @@ function src.syncClientItemTypes(player, payload) end
 
 ---Send a custom vehicle type sync payload to clients.
 ---Prefer src.syncCustomVehicleTypes, which builds the payload for you.
+---The payload replaces the complete custom vehicle type list; an empty list clears it.
 ---@param player Player|nil The target player, or nil to broadcast.
 ---@param payload table The sync payload, as built by the runtime.
 ---@return integer|boolean sent The number of clients queued when broadcasting, or whether the frame was queued for a single player.
@@ -61,10 +63,12 @@ function src.syncClientVehicleTypes(player, payload) end
 
 ---Build and send the current custom item type set to clients.
 ---@param player? Player The target player, or nil to broadcast.
----@return integer|boolean sent False if there are no custom item types.
+---@return integer|boolean sent Empty type sets are also sent to clear previous definitions.
 function src.syncCustomItemTypes(player) end
 
 ---Assign a client-side CMO model to an item type and sync it.
+---Replaces any previous CMO, ITM, or IT3 model assignment for this type.
+---Synced paths must match the current manifest; a bare filename must be unique.
 ---@param indexOrType integer|ItemType The item type to assign to (0-254).
 ---@param modelName string The CMO model name, resolved from the synced assets.
 ---@param player? Player The target player, or nil to broadcast.
@@ -80,6 +84,8 @@ function src.setItemTypeIcon(indexOrType, iconPath, player) end
 
 ---Assign an .itm definition file to an item type, apply it server-side, and
 ---sync it to clients.
+---Replaces any previous CMO, ITM, or IT3 model assignment for this type.
+---Synced paths must match the current manifest; a bare filename must be unique.
 ---@param indexOrType integer|ItemType The item type to assign to (0-254).
 ---@param itmPath string A forward-slash path ending in .itm, resolved against clientRoot.
 ---@param player? Player The target player, or nil to broadcast.
@@ -88,6 +94,8 @@ function src.setItemTypeITM(indexOrType, itmPath, player) end
 
 ---Assign an .it3 definition file to an item type, apply it server-side, and
 ---sync it to clients.
+---Replaces any previous CMO, ITM, or IT3 model assignment for this type.
+---Synced paths must match the current manifest; a bare filename must be unique.
 ---@param indexOrType integer|ItemType The item type to assign to (0-254).
 ---@param it3Path string A forward-slash path ending in .it3, resolved against clientRoot.
 ---@param player? Player The target player, or nil to broadcast.
@@ -95,6 +103,8 @@ function src.setItemTypeITM(indexOrType, itmPath, player) end
 function src.setItemTypeIT3(indexOrType, it3Path, player) end
 
 ---Assign a client-side texture to an item type's model and sync it.
+---File paths resolve within the current manifest; bare filenames must be unique.
+---Builtin textures are available without first rendering a vanilla item.
 ---@param indexOrType integer|ItemType The item type to assign to (0-254).
 ---@param textureRef string A builtin texture name (gun_tex, grenade, soccerball, watermelon, tex_2) or a synced texture file path.
 ---@param player? Player The target player, or nil to broadcast.
@@ -110,7 +120,7 @@ function src.setItemTypeFireSounds(indexOrType, soundPaths, player) end
 
 ---Build and send the current custom vehicle type set to clients.
 ---@param player? Player The target player, or nil to broadcast.
----@return integer|boolean sent False if there are no custom vehicle types.
+---@return integer|boolean sent Empty type sets are also sent to clear previous definitions.
 function src.syncCustomVehicleTypes(player) end
 
 ---Assign a client-side model to a vehicle type and sync it.

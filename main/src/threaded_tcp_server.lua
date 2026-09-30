@@ -1,4 +1,5 @@
 local codec = require("main.src.threaded_tcp_codec")
+local json = require("main.json")
 
 local M = {}
 local Server = {}
@@ -79,21 +80,22 @@ local function new_connection(server, event)
 		server.worker:sendMessage(codec.encode(codec.CLOSE, self.id, 0))
 	end
 
-	function connection:start_bundle(bundle_id, archive_sha256, archive, end_frame)
+	function connection:start_bundle(bundle_id, end_frame)
 		if self.stream_active then
 			return false
 		end
 
-		if server.cached_bundle_hashes[bundle_id] ~= archive_sha256 then
-			local cache_payload = string.pack(">I2", #bundle_id) .. bundle_id .. archive
-			server.worker:sendMessage(
-				codec.encode(codec.CACHE_BUNDLE, 0, #archive, cache_payload)
-			)
-			server.cached_bundle_hashes[bundle_id] = archive_sha256
-		end
-
 		local payload = string.pack(">I2", #bundle_id) .. bundle_id .. end_frame
 		server.worker:sendMessage(codec.encode(codec.START_BUNDLE, self.id, 0, payload))
+		self.stream_active = true
+		return true
+	end
+
+	function connection:start_partial(bundle_id, paths)
+		if self.stream_active then return false end
+		server.worker:sendMessage(codec.encode(codec.START_PARTIAL, self.id, 0, json.encode({
+			id = bundle_id, paths = paths, manifest = server.manifest_hash,
+		})))
 		self.stream_active = true
 		return true
 	end
@@ -120,13 +122,27 @@ function M.new(port)
 		is_listening = false,
 		accept_queue = {},
 		connections = {},
-		cached_bundle_hashes = {},
 		pending_send_messages = 0,
 		last_error = nil,
 		started_at = os.realClock(),
 	}, Server)
 	server.worker:sendMessage(codec.encode(codec.BIND, 0, port))
 	return server
+end
+
+-- Publish once per immutable snapshot, before accepting join work. Never copy ZIPs per client.
+function Server:set_snapshot(state)
+	if self.manifest_hash == state.manifest_hash then return end
+	local bundles = {}
+	for _, bundle in ipairs(state.sync_bundles) do
+		local payload = string.pack(">I2", #bundle.id) .. bundle.id .. bundle.archive
+		self.worker:sendMessage(codec.encode(codec.CACHE_BUNDLE, 0, #bundle.archive, payload))
+		bundles[#bundles + 1] = { id = bundle.id, files = bundle.files, }
+	end
+	self.worker:sendMessage(codec.encode(codec.SYNC_SNAPSHOT, 0, 0, json.encode({
+		manifest = state.manifest_hash, bundles = bundles,
+	})))
+	self.manifest_hash = state.manifest_hash
 end
 
 function Server:poll()

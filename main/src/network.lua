@@ -4,12 +4,10 @@ local log = require("main.src.log")
 local event_codec = require("main.src.event_codec")
 local protocol = require("main.src.protocol")
 local sync_paths = require("main.src.sync_paths")
-local sync_snapshot = require("main.src.sync_snapshot")
 local threaded_tcp_codec = require("main.src.threaded_tcp_codec")
 local threaded_tcp_server = require("main.src.threaded_tcp_server")
 local udp_events = require("main.src.udp_events")
 local world_mutations = require("main.src.world_mutations")
-local has_miniz_integration = pcall(require, "libminiz")
 
 local M = {}
 local HEARTBEAT_TIMEOUT_SECONDS = 60
@@ -571,67 +569,6 @@ local function queue_sync_file(state, connection, relative_path)
 	table.insert(client.pending_file_requests, relative_path)
 end
 
-local function build_partial_bundle(state, bundle_id, paths)
-	if not has_miniz_integration or type(miniz) ~= "table"
-		or type(miniz.createZip) ~= "function" or type(miniz.extractZip) ~= "function" then
-		return nil, "ZIP integration is unavailable"
-	end
-	if type(paths) ~= "table" or #paths == 0 or #paths > #state.scripts + #state.asset_files then
-		return nil, "invalid partial bundle path list"
-	end
-	local expected_id = "partial-" .. crypto.sha256(
-		state.manifest_hash .. table.concat(paths, "\n") .. "\n"
-	):sub(1, 16)
-	if bundle_id ~= expected_id then
-		return nil, "invalid partial bundle id"
-	end
-
-	local snapshot_inputs = {}
-	for _, source_bundle in ipairs(state.sync_bundles) do
-		local ok, extracted = pcall(miniz.extractZip, source_bundle.archive)
-		if not ok or type(extracted) ~= "table" then
-			return nil, "failed to read sync snapshot"
-		end
-		for path, bytes in pairs(extracted) do
-			snapshot_inputs[path] = bytes
-		end
-	end
-
-	local archive_inputs = {}
-	local files = {}
-	local seen = {}
-	for i = 1, #paths do
-		local path = paths[i]
-		local record = type(path) == "string" and
-			(state.scripts_by_path[path] or state.asset_files_by_path[path]) or nil
-		if not record or seen[path] then
-			return nil, "invalid partial bundle path"
-		end
-
-		local bytes = snapshot_inputs[path]
-		if not bytes or #bytes ~= record.size or crypto.sha256(bytes) ~= record.sha256 then
-			return nil, "partial bundle snapshot is inconsistent"
-		end
-
-		seen[path] = true
-		archive_inputs[path] = bytes
-		files[#files + 1] = record
-	end
-
-	local ok, archive = pcall(miniz.createZip, archive_inputs)
-	if not ok or type(archive) ~= "string" or archive == "" then
-		return nil, "failed to create partial ZIP"
-	end
-	return {
-		id = bundle_id,
-		kind = "partial",
-		archive = archive,
-		size = #archive,
-		archive_sha256 = crypto.sha256(archive),
-		files = files,
-	}
-end
-
 local function queue_sync_bundle(state, connection, bundle_id, paths)
 	local client = state.clients[connection]
 	if not client or type(bundle_id) ~= "string" or bundle_id == "" then
@@ -640,27 +577,11 @@ local function queue_sync_bundle(state, connection, bundle_id, paths)
 
 	local bundle = state.sync_bundles_by_id and state.sync_bundles_by_id[bundle_id] or nil
 	if type(paths) == "table" then
-		if bundle_id:sub(1, 8) ~= "partial-" then
-			bundle = nil
-		else
-			local error_message = nil
-			bundle, error_message = build_partial_bundle(state, bundle_id, paths)
-			if not bundle then
-				enqueue_frame(state, connection, "ERROR_REPORT", { error = error_message })
-				return
-			end
-			state.sync_bundles_by_id[bundle_id] = bundle
-			enqueue_frame(state, connection, "BUNDLE_BEGIN", {
-				id = bundle.id,
-				size = bundle.size,
-				archiveSha256 = bundle.archive_sha256,
-			})
-		end
-	end
-	if not bundle or type(bundle.archive) ~= "string" or bundle.archive == "" then
+		-- The worker validates the request against its immutable snapshot and builds the ZIP.
+		bundle = { id = bundle_id, kind = "partial", paths = paths, }
+	elseif not bundle then
 		enqueue_frame(state, connection, "ERROR_REPORT", {
-			error = "invalid BUNDLE_REQ id",
-			id = bundle_id,
+			error = "invalid BUNDLE_REQ id", id = bundle_id,
 		})
 		return
 	end
@@ -669,13 +590,13 @@ local function queue_sync_bundle(state, connection, bundle_id, paths)
 		return
 	end
 
-	for _, queued_id in ipairs(client.pending_bundle_requests) do
-		if queued_id == bundle_id then
+	for _, queued in ipairs(client.pending_bundle_requests) do
+		if queued.id == bundle_id then
 			return
 		end
 	end
 
-	table.insert(client.pending_bundle_requests, bundle_id)
+	table.insert(client.pending_bundle_requests, bundle)
 end
 
 local function start_next_file_transfer(state, connection, client)
@@ -722,25 +643,17 @@ local function start_next_bundle_transfer(state, connection, client)
 		return false
 	end
 
-	local bundle_id = table.remove(client.pending_bundle_requests, 1)
-	local bundle = state.sync_bundles_by_id and state.sync_bundles_by_id[bundle_id] or nil
-	if not bundle or type(bundle.archive) ~= "string" then
-		enqueue_frame(state, connection, "ERROR_REPORT", {
-			error = "bundle not found in sync index",
-			id = bundle_id,
-		})
-		return false
+	local bundle = table.remove(client.pending_bundle_requests, 1)
+	local bundle_id = bundle.id
+	local started
+	if bundle.kind == "partial" then
+		started = connection:start_partial(bundle_id, bundle.paths)
+	else
+		local end_frame = json.encode({ type = "BUNDLE_END", payload = { id = bundle_id } }) .. "\n"
+		started = connection:start_bundle(bundle_id, end_frame)
 	end
-
-	local end_frame = json.encode({ type = "BUNDLE_END", payload = { id = bundle_id } }) .. "\n"
-	local started = connection:start_bundle(
-		bundle_id,
-		bundle.archive_sha256,
-		bundle.archive,
-		end_frame
-	)
 	if not started then
-		table.insert(client.pending_bundle_requests, 1, bundle_id)
+		table.insert(client.pending_bundle_requests, 1, bundle)
 		return false
 	end
 
@@ -1113,11 +1026,11 @@ local function queue_item_types_sync_frame(state, connection, payload)
 		return false
 	end
 
-	if type(payload.itemTypes) ~= "table" or #payload.itemTypes == 0 then
+	if type(payload.itemTypes) ~= "table" then
 		return false
 	end
 
-	if type(payload.binRaw) ~= "string" or payload.binRaw == "" then
+	if type(payload.binRaw) ~= "string" then
 		return false
 	end
 
@@ -1154,7 +1067,7 @@ local function queue_vehicle_types_sync_frame(state, connection, payload)
 		return false
 	end
 
-	if type(payload.vehicleTypes) ~= "table" or #payload.vehicleTypes == 0 then
+	if type(payload.vehicleTypes) ~= "table" then
 		return false
 	end
 
@@ -1330,50 +1243,66 @@ local function send_initial_custom_item_sync(state, connection)
 		local ok, payload_or_error = pcall(item_types.build_sync_payload, state)
 		if ok then
 			local payload = payload_or_error
-			if type(payload) == "table" and type(payload.itemTypes) == "table" and #payload.itemTypes > 0 then
+			local defined_types = {}
+			for _, entry in ipairs(type(payload) == "table" and payload.itemTypes or {}) do
+				defined_types[entry.index] = true
+			end
+			if type(payload) == "table" and type(payload.itemTypes) == "table" then
 				queue_item_types_sync_frame(state, connection, payload)
 			end
 
 			local model_assignments = state.item_type_model_assignments
 			if type(model_assignments) == "table" then
 				for idx, model_name in pairs(model_assignments) do
-					queue_item_type_model_frame(state, connection, idx, model_name)
+					if defined_types[idx] or idx < 46 then
+						queue_item_type_model_frame(state, connection, idx, model_name)
+					end
 				end
 			end
 
-			if type(payload) == "table" and type(payload.itemTypes) == "table" and #payload.itemTypes > 0 then
+			if type(payload) == "table" and type(payload.itemTypes) == "table" then
 				local itm_assignments = state.item_type_itm_assignments
 				if type(itm_assignments) == "table" then
 					for idx, itm_path in pairs(itm_assignments) do
-						queue_item_type_itm_frame(state, connection, idx, itm_path)
+						if defined_types[idx] then
+							queue_item_type_itm_frame(state, connection, idx, itm_path)
+						end
 					end
 				end
 
 				local it3_assignments = state.item_type_it3_assignments
 				if type(it3_assignments) == "table" then
 					for idx, it3_path in pairs(it3_assignments) do
-						queue_item_type_it3_frame(state, connection, idx, it3_path)
+						if defined_types[idx] then
+							queue_item_type_it3_frame(state, connection, idx, it3_path)
+						end
 					end
 				end
 
 				local icon_assignments = state.item_type_icon_assignments
 				if type(icon_assignments) == "table" then
 					for idx, icon_path in pairs(icon_assignments) do
-						queue_item_type_icon_frame(state, connection, idx, icon_path)
+						if defined_types[idx] then
+							queue_item_type_icon_frame(state, connection, idx, icon_path)
+						end
 					end
 				end
 
 				local texture_assignments = state.item_type_texture_assignments
 				if type(texture_assignments) == "table" then
 					for idx, texture_assignment in pairs(texture_assignments) do
-						queue_item_type_texture_frame(state, connection, idx, texture_assignment)
+						if defined_types[idx] then
+							queue_item_type_texture_frame(state, connection, idx, texture_assignment)
+						end
 					end
 				end
 
 				local fire_sound_assignments = state.item_type_fire_sound_assignments
 				if type(fire_sound_assignments) == "table" then
 					for idx, sound_assignment in pairs(fire_sound_assignments) do
-						queue_item_type_fire_sounds_frame(state, connection, idx, sound_assignment)
+						if defined_types[idx] then
+							queue_item_type_fire_sounds_frame(state, connection, idx, sound_assignment)
+						end
 					end
 				end
 			end
@@ -1403,20 +1332,28 @@ local function send_initial_custom_vehicle_sync(state, connection)
 		local ok, payload_or_error = pcall(vehicle_types.build_sync_payload, state)
 		if ok then
 			local payload = payload_or_error
-			if type(payload) == "table" and type(payload.vehicleTypes) == "table" and #payload.vehicleTypes > 0 then
+			if type(payload) == "table" and type(payload.vehicleTypes) == "table" then
 				queue_vehicle_types_sync_frame(state, connection, payload)
+				local defined_types = {}
+				for _, entry in ipairs(payload.vehicleTypes) do
+					defined_types[entry.index] = true
+				end
 
 				local model_assignments = state.vehicle_type_model_assignments
 				if type(model_assignments) == "table" then
 					for idx, model_name in pairs(model_assignments) do
-						queue_vehicle_type_model_frame(state, connection, idx, model_name)
+						if defined_types[idx] then
+							queue_vehicle_type_model_frame(state, connection, idx, model_name)
+						end
 					end
 				end
 
 				local audio_assignments = state.vehicle_type_audio_assignments
 				if type(audio_assignments) == "table" then
 					for idx, audio_reference in pairs(audio_assignments) do
-						queue_vehicle_type_audio_frame(state, connection, idx, audio_reference)
+						if defined_types[idx] then
+							queue_vehicle_type_audio_frame(state, connection, idx, audio_reference)
+						end
 					end
 				end
 			end
@@ -1549,9 +1486,10 @@ local function handle_index_request(state, connection)
 		return
 	end
 
-	if #state.sync_bundles == 0 and #state.scripts == 0 and #state.asset_files == 0 then
-		sync_snapshot.discover(state)
-	end
+	-- INDEX_RES terminates the runtime snapshot, including before the game player is bound.
+	-- Refresh must replace the previous snapshot even when the new type lists are empty.
+	send_initial_custom_item_sync(state, connection)
+	send_initial_custom_vehicle_sync(state, connection)
 	enqueue_frame(state, connection, "INDEX_RES", {
 		bundles = bundle_metadata_list(state),
 		loadedLevel = state.loaded_level,
@@ -1856,6 +1794,7 @@ end
 
 local function close_all(state)
 	for connection, _ in pairs(state.clients) do
+		clear_client_state(state, connection)
 		if connection.is_open then
 			pcall(connection.close, connection)
 		end
@@ -2436,6 +2375,9 @@ end
 
 function M.logic_step(state)
 	ensure_tcp_server(state)
+	if state.tcp_server and state.tcp_server.is_open then
+		state.tcp_server:set_snapshot(state)
+	end
 	accept_connections(state)
 	process_clients(state)
 end
