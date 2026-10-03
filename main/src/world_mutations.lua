@@ -15,6 +15,7 @@ end
 function M.install(state, src)
 	state.world_mutation_generation = state.world_mutation_generation or 1
 	state.deleted_world_blocks = state.deleted_world_blocks or {}
+	state.world_mutations_ready = state.world_mutations_ready == true
 
 	local function emit_delete(player, cell)
 		return src.emitClientEvent(
@@ -36,6 +37,7 @@ function M.install(state, src)
 	local function reset_mutations()
 		state.world_mutation_generation = state.world_mutation_generation + 1
 		state.deleted_world_blocks = {}
+		state.world_mutations_ready = true
 		if src.enabled then
 			src.emitClientEvent(nil, RESET_EVENT, state.world_mutation_generation)
 		end
@@ -50,21 +52,29 @@ function M.install(state, src)
 		end
 
 		physics.deleteBlock(x, y, z)
-		emit_delete(nil, record_delete(x, y, z))
+		if state.world_mutations_ready then
+			emit_delete(nil, record_delete(x, y, z))
+		end
 		return true
 	end
 
 	hook.add("PostAreaDeleteBlock", "main.src.worldMutations", function(x, y, z)
-		if src.enabled then
+		if src.enabled and state.world_mutations_ready then
 			emit_delete(nil, record_delete(x, y, z))
 		end
+	end)
+
+	hook.add("ResetGame", "main.src.worldMutations", function()
+		state.world_mutations_ready = false
+		state.deleted_world_blocks = {}
 	end)
 
 	hook.add("PostResetGame", "main.src.worldMutations", reset_mutations)
 end
 
 function M.sync(state, src, player)
-	if type(src) ~= "table" or type(src.emitClientEvent) ~= "function" then
+	if not state.world_mutations_ready or type(src) ~= "table"
+		or type(src.emitClientEvent) ~= "function" then
 		return
 	end
 
