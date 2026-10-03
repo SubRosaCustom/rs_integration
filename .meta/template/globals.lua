@@ -159,6 +159,7 @@ function src.registerHumanNecktie(index, def) end
 function src.registerHumanNecklace(index, def) end
 
 ---Delete a world block on the server and sync the deletion to SRC clients.
+---Sync starts at PostResetGame and is suspended during ResetGame/map loading.
 ---@param x integer The block X coordinate.
 ---@param y integer The block Y coordinate.
 ---@param z integer The block Z coordinate.
