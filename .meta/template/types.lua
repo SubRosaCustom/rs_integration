@@ -2,6 +2,10 @@
 --# selene: allow(unscoped_variables)
 ---@meta
 
+---Configuration under config.src. Resource restrictions apply only to this server session.
+---@class SrcConfig
+---@field disallowedPaths string[] Exact game-root-relative paths that local resource packs cannot replace. Empty clears the policy.
+
 ---A value that can be sent through SRC client/server events:
 ---nil, boolean, number, string, or a binary blob created with src.blob().
 ---@alias SrcEventValue nil|boolean|number|string|SrcBlob
