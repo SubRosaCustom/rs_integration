@@ -1465,6 +1465,7 @@ local function handle_hello(state, connection, payload)
 
 	enqueue_frame(state, connection, "HELLO_ACK", {
 		protocol = protocol.VERSION,
+		disallowedPaths = state.config.disallowedPaths or {},
 		port = server.port,
 		udpToken = udp_token,
 		maxEventBytes = state.config.maxEventBytes,
@@ -1492,6 +1493,7 @@ local function handle_index_request(state, connection)
 	send_initial_custom_vehicle_sync(state, connection)
 	enqueue_frame(state, connection, "INDEX_RES", {
 		bundles = bundle_metadata_list(state),
+		disallowedPaths = state.config.disallowedPaths or {},
 		loadedLevel = state.loaded_level,
 		persistentMode = state.persistent_mode,
 		runtimeID = state.runtime_id,
@@ -2301,6 +2303,7 @@ function M.refresh(state, plugin_name)
 			client.generation = generation
 			enqueue_frame(state, connection, "REFRESH_NOTICE", {
 				runtimeID = state.runtime_id,
+				disallowedPaths = state.config.disallowedPaths or {},
 				syncGeneration = generation,
 				manifestHash = state.manifest_hash,
 				pluginReload = plugin_name,

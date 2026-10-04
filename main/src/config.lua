@@ -48,6 +48,7 @@ end
 M.DEFAULTS = {
 	enabled = true,
 	disallowNonSRCPlayers = false,
+	disallowedPaths = {},
 	clientRoot = "subrosacustom",
 	motd = "",
 	motdIcon = "",
@@ -70,7 +71,7 @@ M.DEFAULTS = {
 local function copy_defaults()
 	local copy = {}
 	for key, value in pairs(M.DEFAULTS) do
-		copy[key] = value
+		copy[key] = type(value) == "table" and {} or value
 	end
 	return copy
 end
@@ -100,6 +101,31 @@ function M.resolve(raw)
 
 	if type(raw.disallowNonSRCPlayers) == "boolean" then
 		resolved.disallowNonSRCPlayers = raw.disallowNonSRCPlayers
+	end
+
+	if raw.disallowedPaths ~= nil then
+		assert(type(raw.disallowedPaths) == "table", "config.src.disallowedPaths must be a list")
+		local seen = {}
+		local count = 0
+		for index, path in pairs(raw.disallowedPaths) do
+			count = count + 1
+			assert(type(index) == "number" and index % 1 == 0 and index >= 1 and index <= #raw.disallowedPaths,
+				"config.src.disallowedPaths must be a dense list")
+			assert(type(path) == "string" and #path > 0 and #path <= 255 and not path:find("[\\:%z\1-\31\127]")
+				and path:sub(1, 1) ~= "/" and path:sub(-1) ~= "/" and not path:find("//", 1, true),
+				"invalid resource pack policy path")
+			for part in path:gmatch("[^/]+") do
+				assert(part ~= "." and part ~= ".." and part:sub(-1) ~= "." and part:sub(-1) ~= " ",
+					"invalid resource pack policy path: " .. path)
+			end
+			if not seen[path] then
+				seen[path] = true
+				resolved.disallowedPaths[#resolved.disallowedPaths + 1] = path
+			end
+		end
+		assert(count == #raw.disallowedPaths, "config.src.disallowedPaths must be a dense list")
+		assert(count <= 4096, "resource pack policy exceeds 4096 paths")
+		table.sort(resolved.disallowedPaths)
 	end
 
 	if type(raw.clientRoot) == "string" and raw.clientRoot ~= "" then

@@ -1,5 +1,7 @@
 # Reliable UDP events: protocol 8
 
+SRC control protocol 9 retains the reliable-UDP format and lifecycle described here. It adds resource-pack policy snapshots to control frames; see [resource pack policy](resource_packs.md). Client and integration versions must match.
+
 Client and server must upgrade together. Protocol 7 peers are rejected by the
 existing exact-version handshake. Roll back both modules together. Core's event
 API names and argument types are unchanged.
