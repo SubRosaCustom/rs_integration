@@ -20,7 +20,12 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y liblz4-dev libssl-dev libsqlite3-dev libopus-dev unzip
+          sudo apt-get install -y liblz4-dev libssl-dev libsqlite3-dev libopus-dev unzip lua5.4
+
+      - name: Scoped sync regressions
+        run: |
+          lua5.4 test/scoped_assets_test.lua
+          lua5.4 test/tests/refresh_cancellation.lua
 
       - name: Test
         working-directory: test

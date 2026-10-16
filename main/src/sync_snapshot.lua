@@ -1,4 +1,5 @@
 local sync_paths = require("main.src.sync_paths")
+local client_scope = require("main.src.client_scope")
 local has_miniz_integration = pcall(require, "libminiz")
 
 local M = {}
@@ -195,6 +196,7 @@ local function reset_sync_snapshot(state)
 	state.scripts_by_path = {}
 	state.asset_files = {}
 	state.asset_files_by_path = {}
+	state.asset_paths_folded = {}
 	state.sync_bundles = {}
 	state.sync_bundles_by_id = {}
 end
@@ -213,7 +215,15 @@ local function append_snapshot_record(state, bundle, record, bytes)
 		table.insert(state.scripts, snapshot_record)
 		state.scripts_by_path[snapshot_record.path] = snapshot_record
 	else
-		if state.asset_files_by_path[snapshot_record.path] then
+		local folded = string.lower(snapshot_record.path)
+		local spelling = state.asset_paths_folded[folded]
+		assert(not spelling or spelling == snapshot_record.path,
+			"Case-conflicting asset path: " .. snapshot_record.path)
+		state.asset_paths_folded[folded] = snapshot_record.path
+		local previous = state.asset_files_by_path[snapshot_record.path]
+		if previous then
+			assert(previous.size == snapshot_record.size and previous.sha256 == snapshot_record.sha256,
+				"Conflicting asset path: " .. snapshot_record.path)
 			return
 		end
 		table.insert(state.asset_files, snapshot_record)
@@ -243,6 +253,7 @@ local function collect_scripts_recursive(state, bundle, root, relative_path)
 		return
 	end
 
+	table.sort(entries, function(a, b) return a.name < b.name end)
 	for _, entry in ipairs(entries) do
 		if entry.isDirectory then
 			if relative_path == "" and (entry.name == "assets" or entry.name == "scripts") then
@@ -304,33 +315,9 @@ function M.normalize_loaded_level(raw_level)
 end
 
 function M.normalize_persistent_mode(raw_mode)
-	if type(raw_mode) ~= "string" then
-		return ""
-	end
-
-	local mode = raw_mode:gsub("\\", "/")
-	mode = mode:gsub("^%s+", "")
-	mode = mode:gsub("%s+$", "")
-	mode = mode:gsub("^/+", "")
-	mode = mode:gsub("/+$", "")
-
-	if mode == "" then
-		return ""
-	end
-
-	if mode:find("..", 1, true) then
-		return ""
-	end
-
-	local leaf = mode:match("([^/]+)$")
-	if leaf and leaf ~= "" then
-		mode = leaf
-	end
-
-	mode = mode:gsub("%.lua$", "")
-	mode = mode:gsub("^%s+", "")
-	mode = mode:gsub("%s+$", "")
-	return mode
+	if type(raw_mode) ~= "string" then return "" end
+	local mode = raw_mode:gsub("%.lua$", "")
+	return client_scope.valid_owner(mode) and mode or ""
 end
 
 function M.discover_persistent_mode(state)
@@ -352,11 +339,13 @@ local function collect_asset_files_recursive(state, bundle, root, sync_root_pref
 	end
 
 	local ok, entries = pcall(os.listDirectory, current)
-	if not ok or type(entries) ~= "table" then
-		return
-	end
+	assert(ok and type(entries) == "table", "Cannot enumerate asset root: " .. current)
 
+	table.sort(entries, function(a, b) return a.name < b.name end)
 	for _, entry in ipairs(entries) do
+		-- Reject unsafe components before either recursion or reads.
+		local candidate = sync_paths.join(current, entry.name)
+		if not sync_paths.is_contained(root, candidate) then goto continue end
 		if entry.isDirectory then
 			local child = entry.name
 			if relative_path ~= "" then
@@ -377,7 +366,7 @@ local function collect_asset_files_recursive(state, bundle, root, sync_root_pref
 			if sync_paths.is_safe_asset(sync_path) then
 				local should_skip = should_skip_bundled_model_cmo(sync_path)
 				if not should_skip then
-					local bytes = sync_paths.read_file(full_path)
+					local bytes = assert(sync_paths.read_file(full_path), "Cannot read asset: " .. full_path)
 					if bytes then
 						if should_skip_bundled_vehicle_sbv(sync_path, bytes) then
 							goto continue
@@ -404,6 +393,7 @@ local function collect_top_level_vehicle_sbv_files(state, bundle, root, sync_roo
 		return
 	end
 
+	table.sort(entries, function(a, b) return a.name < b.name end)
 	for _, entry in ipairs(entries) do
 		if not entry.isDirectory then
 			local relative_path = entry.name
@@ -434,7 +424,7 @@ local function collect_top_level_vehicle_sbv_files(state, bundle, root, sync_roo
 	end
 end
 
-function M.discover(state)
+local function build_snapshot(state)
 	M.discover_persistent_mode(state)
 	reset_sync_snapshot(state)
 	local normalized_level = M.normalize_loaded_level(server and server.loadedLevel or nil)
@@ -446,12 +436,27 @@ function M.discover(state)
 	pcall(os.createDirectory, scripts_root)
 	pcall(os.createDirectory, assets_root)
 
+	local enabled, disabled_source = client_scope.enabled(state.config)
 	local client_bundle = new_bundle("clientroot", "clientroot")
 	collect_scripts_recursive(state, client_bundle, scripts_root, "")
-	if #state.scripts == 0 then
+	local using_legacy_scripts = #state.scripts == 0
+	if using_legacy_scripts then
 		collect_scripts_recursive(state, client_bundle, state.config.clientRoot, "")
 	end
-	collect_asset_files_recursive(state, client_bundle, assets_root, "", "")
+	if not using_legacy_scripts or disabled_source ~= nil then
+		assert(client_bundle.archive_inputs["disabledPlugins.json"] == disabled_source,
+			"Client disable state changed while building snapshot")
+	end
+	state.client_plugin_signature = table.concat(enabled, "\n")
+	local function collect_owner(namespace, owner)
+		local root = sync_paths.join(assets_root, namespace .. "/" .. owner)
+		if sync_paths.is_contained(state.config.clientRoot, assets_root)
+			and sync_paths.is_contained(assets_root, root) then
+			collect_asset_files_recursive(state, client_bundle, root, "", "")
+		end
+	end
+	if state.persistent_mode ~= "" then collect_owner("modes", state.persistent_mode) end
+	for _, name in ipairs(enabled) do collect_owner("plugins", name) end
 	collect_top_level_vehicle_sbv_files(state, client_bundle, "data", "data")
 
 	client_bundle = finalize_bundle(client_bundle)
@@ -463,7 +468,9 @@ function M.discover(state)
 	if normalized_level ~= "" and not is_default_game_map_name(normalized_level) then
 		local level_sync_root = "data/" .. normalized_level
 		local map_bundle = new_bundle("map", "map")
-		collect_asset_files_recursive(state, map_bundle, level_sync_root, level_sync_root, "")
+		if sync_paths.exists(level_sync_root) then
+			collect_asset_files_recursive(state, map_bundle, level_sync_root, level_sync_root, "")
+		end
 		map_bundle = finalize_bundle(map_bundle)
 		if map_bundle then
 			table.insert(state.sync_bundles, map_bundle)
@@ -482,6 +489,7 @@ function M.discover(state)
 	local manifest = {
 		state.loaded_level,
 		state.persistent_mode,
+		state.client_plugin_signature,
 	}
 	for _, bundle in ipairs(state.sync_bundles) do
 		manifest[#manifest + 1] = table.concat({
@@ -492,8 +500,22 @@ function M.discover(state)
 			bundle.content_sha256,
 		}, "|")
 	end
+	assert(client_scope.signature(state.config) == state.client_plugin_signature,
+		"Client plugin entries changed while building snapshot")
 	state.manifest_hash = crypto.sha256(table.concat(manifest, "\n"))
 
+	return state.scripts, state.asset_files, state.sync_bundles
+end
+
+function M.discover(state)
+	-- A conflict or malformed scope must not replace a valid published snapshot.
+	local next_state = { config = state.config }
+	build_snapshot(next_state)
+	for _, key in ipairs({ "scripts", "scripts_by_path", "asset_files", "asset_files_by_path",
+		"sync_bundles", "sync_bundles_by_id", "loaded_level", "persistent_mode",
+		"client_plugin_signature", "manifest_hash" }) do
+		state[key] = next_state[key]
+	end
 	return state.scripts, state.asset_files, state.sync_bundles
 end
 

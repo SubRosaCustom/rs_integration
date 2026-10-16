@@ -64,6 +64,36 @@ function M.assets_root(runtime_config)
 	return M.join(runtime_config.clientRoot, "assets")
 end
 
+-- Resolve before reading so an owner cannot import another tree through symlinks.
+-- RosaServer runs on LuaJIT/Linux; fail closed if canonicalization is unavailable.
+local realpath
+local ok, ffi = pcall(require, "ffi")
+if ok then
+	pcall(ffi.cdef, "char *realpath(const char *path, char *resolved_path); void free(void *ptr);")
+	realpath = function(path)
+		local resolved = ffi.C.realpath(path, nil)
+		if resolved == nil then return nil end
+		local result = ffi.string(resolved)
+		ffi.C.free(resolved)
+		return result
+	end
+end
+
+function M.exists(path)
+	return realpath ~= nil and realpath(path) ~= nil
+end
+
+function M.is_contained(root, path)
+	if not realpath or type(root) ~= "string" or type(path) ~= "string" then return false end
+	root = root:gsub("/+$", "")
+	if path:sub(1, #root + 1) ~= root .. "/" then return false end
+	local relative = path:sub(#root + 2)
+	if relative == "" or relative:find("..", 1, true) or relative:find("\\", 1, true)
+		or relative:find("//", 1, true) or relative:find("%c") or relative:find(":", 1, true) then return false end
+	local base, resolved = realpath(root), realpath(path)
+	return base ~= nil and resolved ~= nil and resolved == base .. "/" .. relative
+end
+
 function M.read_file(path)
 	local file = io.open(path, "rb")
 	if not file then
@@ -98,6 +128,9 @@ local function is_relative(path)
 		and not path:find("\\", 1, true)
 		and path:sub(1, 1) ~= "/"
 		and not path:find("..", 1, true)
+		and not path:find(":", 1, true)
+		and not path:find("%c")
+		and not path:find("//", 1, true)
 end
 
 function M.is_safe_script(path)

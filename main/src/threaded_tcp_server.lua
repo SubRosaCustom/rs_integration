@@ -30,6 +30,8 @@ local function new_connection(server, event)
 		pending_receive_bytes = 0,
 		pending_send_bytes = 0,
 		stream_active = false,
+		stream_generation = 0,
+		next_send_frame_id = 0,
 		send_stats = nil,
 	}
 
@@ -47,8 +49,15 @@ local function new_connection(server, event)
 			return 0
 		end
 
-		local payload = bytes:sub(1, accepted)
-		server.worker:sendMessage(codec.encode(codec.SEND, self.id, accepted, payload))
+		local frame_id = self.send_frame_id
+		if not frame_id then
+			self.next_send_frame_id = self.next_send_frame_id % 0xFFFFFFFF + 1
+			frame_id = self.next_send_frame_id
+		end
+		local complete = accepted == #bytes
+		local payload = string.char(complete and 1 or 0) .. bytes:sub(1, accepted)
+		server.worker:sendMessage(codec.encode(codec.SEND_FRAME, self.id, frame_id, payload))
+		self.send_frame_id = not complete and frame_id or nil
 		self.pending_send_bytes = self.pending_send_bytes + accepted
 		server.pending_send_messages = server.pending_send_messages + 1
 		return accepted
@@ -86,22 +95,28 @@ local function new_connection(server, event)
 		end
 
 		local payload = string.pack(">I2", #bundle_id) .. bundle_id .. end_frame
-		server.worker:sendMessage(codec.encode(codec.START_BUNDLE, self.id, 0, payload))
+		self.stream_generation = self.stream_generation % 0xFFFFFFFF + 1
+		server.worker:sendMessage(codec.encode(codec.START_BUNDLE, self.id, self.stream_generation, payload))
 		self.stream_active = true
 		return true
 	end
 
 	function connection:start_partial(bundle_id, paths)
 		if self.stream_active then return false end
-		server.worker:sendMessage(codec.encode(codec.START_PARTIAL, self.id, 0, json.encode({
+		self.stream_generation = self.stream_generation % 0xFFFFFFFF + 1
+		server.worker:sendMessage(codec.encode(codec.START_PARTIAL, self.id, self.stream_generation, json.encode({
 			id = bundle_id, paths = paths, manifest = server.manifest_hash,
 		})))
 		self.stream_active = true
 		return true
 	end
 
-	function connection:discard_pending_sends()
-		server.worker:sendMessage(codec.encode(codec.DISCARD_SENDS, self.id, 0))
+	function connection:discard_pending_sends(remaining_frame)
+		server.worker:sendMessage(codec.encode(
+			codec.DISCARD_SENDS, self.id, self.send_frame_id or 0, remaining_frame
+		))
+		self.send_frame_id = nil
+		self.stream_generation = self.stream_generation % 0xFFFFFFFF + 1
 		self.stream_active = false
 	end
 
@@ -194,7 +209,7 @@ function Server:poll()
 			end
 		elseif event.kind == codec.STREAM_DONE then
 			local connection = self.connections[event.id]
-			if connection then
+			if connection and connection.stream_generation == event.value then
 				connection.stream_active = false
 			end
 		elseif event.kind == codec.SEND_STATS then

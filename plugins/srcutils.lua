@@ -9,6 +9,7 @@ require("main.src.init")
 local json = require("main.json")
 local runtime_state = require("main.src.runtime_state")
 local sync_paths = require("main.src.sync_paths")
+local client_scope = require("main.src.client_scope")
 local watcher = require("main.src.watcher")
 
 local src = assert(_G.src, "SRC utils requires main.src.init to initialize first")
@@ -29,25 +30,7 @@ local function disabled_plugins_path()
 end
 
 local function read_disabled_plugins()
-	local source = sync_paths.read_file(disabled_plugins_path())
-	if not source or source == "" then
-		return {}
-	end
-
-	local ok, decoded = pcall(json.decode, source)
-	if not ok or type(decoded) ~= "table" then
-		error(string.format("Invalid %s", disabled_plugins_file))
-	end
-
-	local names = {}
-	for i = 1, #decoded do
-		local name = decoded[i]
-		if type(name) == "string" and name ~= "" then
-			names[name] = true
-		end
-	end
-
-	return names
+	return client_scope.read_disabled(state.config)
 end
 
 local function write_disabled_plugins(names)
@@ -75,33 +58,32 @@ local function write_disabled_plugins(names)
 end
 
 local function collect_client_runtime_names()
-	local names = {}
-	for _, name_space in ipairs({ "plugins", "modes" }) do
-		local root = sync_paths.join(scripts_root(), name_space)
-		local ok, entries = pcall(os.listDirectory, root)
-		if ok and type(entries) == "table" then
-			for _, entry in ipairs(entries) do
-				if entry.isDirectory then
-					local init_path = sync_paths.join(sync_paths.join(root, entry.name), "init.lua")
-					if sync_paths.read_file(init_path) then
-						names[entry.name] = true
-					end
-				else
-					local stem = entry.name:match("^(.+)%.lua$")
-					if stem and stem ~= "init" then
-						names[stem] = true
-					end
-				end
-			end
+	local names, seen = {}, {}
+	for _, namespace in ipairs({ "plugins", "modes" }) do
+		for _, name in ipairs(client_scope.names(state.config, namespace)) do
+			if not seen[name] then names[#names + 1], seen[name] = name, true end
 		end
 	end
+	table.sort(names)
+	return names
+end
 
-	local sorted = {}
-	for name, _ in pairs(names) do
-		sorted[#sorted + 1] = name
+local function has_client_plugin(name)
+	for _, candidate in ipairs(client_scope.names(state.config, "plugins")) do
+		if candidate == name then return true end
 	end
-	table.sort(sorted)
-	return sorted
+	return false
+end
+
+local function auto_complete_client_plugin_arg(args)
+	if #args < 1 then return end
+	local beginning = string.lower(args[1])
+	for _, name in ipairs(client_scope.names(state.config, "plugins")) do
+		if string.lower(name):sub(1, #beginning) == beginning then
+			args[1] = name
+			return
+		end
+	end
 end
 
 local function has_client_runtime(name)

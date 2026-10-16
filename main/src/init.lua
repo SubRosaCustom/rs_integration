@@ -9,6 +9,7 @@ local browser_marker = require("main.src.browser_marker")
 local human_models = require("main.src.human_models")
 local item_types = require("main.src.item_types")
 local runtime_state = require("main.src.runtime_state")
+local client_scope = require("main.src.client_scope")
 local sync_snapshot = require("main.src.sync_snapshot")
 local vehicle_types = require("main.src.vehicle_types")
 local world_mutations = require("main.src.world_mutations")
@@ -27,6 +28,22 @@ human_models.install(state, src, was_legacy)
 local function refresh_now()
 	sync_snapshot.discover(state)
 	src.refresh()
+end
+
+local function refresh_automatically()
+	if state.tick < (state.next_scope_refresh_tick or 0) then return false end
+	local ok, err = pcall(refresh_now)
+	if not ok then
+		state.next_scope_refresh_tick = state.tick + 60
+		if err ~= state.scope_refresh_error then
+			log.info("client scope refresh rejected: %s", tostring(err))
+		end
+		state.scope_refresh_error = err
+		return false
+	end
+	state.scope_refresh_error = nil
+	state.next_scope_refresh_tick = nil
+	return true
 end
 
 local function disable_runtime(reason)
@@ -78,7 +95,24 @@ end
 
 function src.reloadClientPlugin(plugin_name)
 	assert(type(plugin_name) == "string" and plugin_name ~= "", "src.reloadClientPlugin(plugin_name): plugin_name must be non-empty string")
+	local previous_mode, previous_level = state.persistent_mode, state.loaded_level
+	local previous_plugins, previous_assets = state.client_plugin_signature, state.asset_files or {}
 	sync_snapshot.discover(state)
+	local assets_changed = #previous_assets ~= #state.asset_files
+	if not assets_changed then
+		for i, entry in ipairs(previous_assets) do
+			local next_entry = state.asset_files[i]
+			if entry.path ~= next_entry.path or entry.sha256 ~= next_entry.sha256 then
+				assets_changed = true
+				break
+			end
+		end
+	end
+	-- Asset/scope changes need a full replay, including surviving Lua owners.
+	if assets_changed or previous_mode ~= state.persistent_mode or previous_level ~= state.loaded_level
+		or previous_plugins ~= state.client_plugin_signature then
+		plugin_name = nil
+	end
 	network.refresh(state, plugin_name)
 end
 
@@ -252,11 +286,21 @@ if not state.hooks_registered then
 			return
 		end
 
+		-- Membership changes must reconcile even when optional content watching is off.
+		if state.tick % 60 == 0 then
+			local ok, signature = pcall(client_scope.signature, state.config)
+			if ok and signature ~= state.client_plugin_signature then
+				refresh_automatically()
+			elseif not ok and signature ~= state.client_scope_error then
+				log.info("client scope refresh rejected: %s", tostring(signature))
+			end
+			state.client_scope_error = not ok and signature or nil
+		end
+
 		local normalized_persistent_mode = sync_snapshot.normalize_persistent_mode(
 			type(hook) == "table" and hook.persistentMode or nil
 		)
-		if normalized_persistent_mode ~= state.persistent_mode then
-			refresh_now()
+		if normalized_persistent_mode ~= state.persistent_mode and refresh_automatically() then
 			log.info(
 				"persistent mode changed to %s; sync refresh queued",
 				state.persistent_mode ~= "" and state.persistent_mode or "<none>"
@@ -264,9 +308,7 @@ if not state.hooks_registered then
 		end
 
 		local normalized_loaded_level = sync_snapshot.normalize_loaded_level(server and server.loadedLevel or nil)
-		if normalized_loaded_level ~= state.loaded_level then
-			sync_snapshot.discover_asset_files(state)
-			src.refresh()
+		if normalized_loaded_level ~= state.loaded_level and refresh_automatically() then
 			log.info("loaded level changed to %s; sync refresh queued", state.loaded_level ~= "" and state.loaded_level or "<none>")
 		end
 
