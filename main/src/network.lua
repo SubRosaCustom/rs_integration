@@ -308,7 +308,13 @@ local function close_client_transfer(client)
 end
 
 local function reset_client_sync_state(connection, client, preserve_udp_state)
-	connection:discard_pending_sends()
+	-- The worker may already have transmitted a prefix of this protocol frame.
+	-- Hand it the unsent tail so cancellation can finish that frame atomically.
+	local remaining_frame
+	if client.send_offset and client.send_offset > 1 and client.send_queue and client.send_queue[1] then
+		remaining_frame = client.send_queue[1]:sub(client.send_offset)
+	end
+	connection:discard_pending_sends(remaining_frame)
 	close_client_transfer(client)
 	client.pending_file_requests = {}
 	client.pending_bundle_requests = {}
@@ -2297,8 +2303,10 @@ end
 function M.refresh(state, plugin_name)
 	local generation = next_sync_generation(state)
 	for connection, client in pairs(state.clients) do
-		if connection.is_open and client.hello and client.bound
-			and validate_bound_player(connection, client) then
+		-- HELLO clients can download before a game player is bound. They must
+		-- cancel the old snapshot too when a mode or plugin leaves the scope.
+		if connection.is_open and client.hello
+			and (not client.bound or validate_bound_player(connection, client)) then
 			reset_client_sync_state(connection, client, true)
 			client.generation = generation
 			enqueue_frame(state, connection, "REFRESH_NOTICE", {

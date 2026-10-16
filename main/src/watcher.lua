@@ -8,6 +8,7 @@ function M.clear(state)
 	state.watched_directories = {}
 	state.watched_root = nil
 	state.pending_refresh_tick = nil
+	state.next_watch_scan_tick = nil
 end
 
 local function watch_directory_recursive(state, root, rel)
@@ -29,7 +30,7 @@ local function watch_directory_recursive(state, root, rel)
 	end
 
 	for _, entry in ipairs(entries) do
-		if entry.isDirectory then
+		if entry.isDirectory and sync_paths.is_contained(root, sync_paths.join(dir, entry.name)) then
 			local child = entry.name
 			if rel ~= "" then
 				child = rel .. "/" .. entry.name
@@ -50,6 +51,17 @@ function M.ensure(state)
 
 	local root = state.config.clientRoot
 	if state.file_watcher and state.watched_root == root then
+		if state.tick >= (state.next_watch_scan_tick or 0) then
+			local previous_count = 0
+			for _ in pairs(state.watched_directories) do previous_count = previous_count + 1 end
+			watch_directory_recursive(state, root, "")
+			local next_count = 0
+			for _ in pairs(state.watched_directories) do next_count = next_count + 1 end
+			if next_count ~= previous_count then
+				state.pending_refresh_tick = state.tick + state.config.autoRefreshDebounceTicks
+			end
+			state.next_watch_scan_tick = state.tick + 60
+		end
 		return
 	end
 
@@ -74,9 +86,9 @@ function M.process(state, on_refresh)
 			break
 		end
 
-		if type(ev.name) == "string" and sync_paths.is_lua(ev.name) then
+		if type(ev.name) == "string" and (sync_paths.is_safe_script(ev.name) or sync_paths.is_safe_asset(ev.name)) then
 			changed = true
-		elseif type(ev.descriptor) == "string" and sync_paths.is_lua(ev.descriptor) then
+		elseif type(ev.descriptor) == "string" and (sync_paths.is_safe_script(ev.descriptor) or sync_paths.is_safe_asset(ev.descriptor)) then
 			changed = true
 		end
 	end

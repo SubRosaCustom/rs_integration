@@ -84,17 +84,47 @@ local function release_send_queue(id, connection)
 	connection.send_queue = {}
 end
 
-local function discard_unsent_frames(id, connection)
-	local in_flight = connection.send_queue[1]
-	local keep_in_flight = in_flight and in_flight.offset > 1
-
+local function discard_unsent_frames(id, connection, remaining_frame_id, remaining_frame)
+	local frame_id = connection.sending_frame_id
+	local retained = {}
 	for index, pending in ipairs(connection.send_queue) do
-		if not (keep_in_flight and index == 1) then
+		-- A main-thread frame can span several worker commands. Preserve every
+		-- fragment of the frame whose prefix is already on the wire.
+		if (frame_id and pending.frame_id == frame_id)
+			or (not frame_id and index == 1 and pending.offset > 1) then
+			retained[#retained + 1] = pending
+		else
 			acknowledge_pending(id, pending)
 		end
 	end
+	if frame_id and frame_id == remaining_frame_id and remaining_frame ~= "" then
+		retained[#retained + 1] = {
+			bytes = remaining_frame, offset = 1, main_owned = false,
+			frame_id = frame_id, frame_end = true,
+		}
+	end
+	connection.send_queue = retained
+end
 
-	connection.send_queue = keep_in_flight and { in_flight } or {}
+local function queue_main_frame(connection, command)
+	assert(#command.payload >= 2, "invalid frame send command")
+	local pending = {
+		bytes = command.payload:sub(2), offset = 1, main_owned = true,
+		frame_id = command.value, frame_end = command.payload:byte(1) == 1,
+	}
+	-- Worker stream frames may have been queued between main-thread fragments.
+	-- Keep each logical frame contiguous even when backpressure split its SENDs.
+	for index = #connection.send_queue, 1, -1 do
+		if connection.send_queue[index].frame_id == pending.frame_id then
+			table.insert(connection.send_queue, index + 1, pending)
+			return
+		end
+	end
+	if connection.sending_frame_id == pending.frame_id then
+		table.insert(connection.send_queue, 1, pending)
+	else
+		connection.send_queue[#connection.send_queue + 1] = pending
+	end
 end
 
 local function close_connection(id)
@@ -128,7 +158,7 @@ local function cache_bundle(payload)
 	bundle_cache[bundle_id] = payload:sub(archive_offset)
 end
 
-local function open_bundle_stream(connection, payload)
+local function open_bundle_stream(connection, payload, generation)
 	if #payload < 3 then
 		error("invalid bundle stream command")
 	end
@@ -152,6 +182,7 @@ local function open_bundle_stream(connection, payload)
 	close_stream(connection)
 	connection.stream = {
 		id = bundle_id,
+		generation = generation or 0,
 		archive = archive,
 		offset = 1,
 		end_frame = end_frame,
@@ -173,12 +204,13 @@ local function set_snapshot(payload)
 		end
 		next_cache[bundle.id] = archive
 	end
-	-- Existing streams hold their own archive; expired snapshots can be released here.
+	-- Refresh sends ordered DISCARD_SENDS commands to release old per-client streams.
+	-- The cache itself retains only this immutable snapshot.
 	bundle_cache = next_cache
 	snapshot = next_snapshot
 end
 
-local function start_partial(connection, payload)
+local function start_partial(connection, payload, generation)
 	local request = json.decode(payload)
 	assert(request.manifest == snapshot.manifest, "stale bundle request")
 	assert(type(request.paths) == "table" and #request.paths > 0, "invalid partial paths")
@@ -200,7 +232,7 @@ local function start_partial(connection, payload)
 	}
 	close_stream(connection)
 	connection.stream = {
-		id = request.id, archive = archive, offset = 1,
+		id = request.id, archive = archive, offset = 1, generation = generation or 0,
 		end_frame = json.encode({ type = "BUNDLE_END", payload = { id = request.id, } }) .. "\n",
 	}
 end
@@ -225,6 +257,7 @@ local function fill_stream_queue(connection)
 				offset = 1,
 				main_owned = false,
 				stream_end = true,
+				stream_generation = stream.generation,
 			}
 		end
 	end
@@ -263,14 +296,23 @@ local function handle_command(command)
 	local connection = connections[command.id]
 	if command.kind == codec.START_PARTIAL then
 		if connection then
-			local ok, failure = pcall(start_partial, connection, command.payload)
+			local ok, failure = pcall(start_partial, connection, command.payload, command.value)
 			if not ok then
 				connection.send_queue[#connection.send_queue + 1] = {
 					bytes = json.encode({ type = "ERROR_REPORT", payload = {
 						error = tostring(failure),
 					} }) .. "\n", offset = 1, main_owned = false, stream_end = true,
+					stream_generation = command.value,
 				}
 			end
+		end
+		return
+	end
+	if command.kind == codec.SEND_FRAME then
+		if connection then
+			queue_main_frame(connection, command)
+		else
+			sendMessage(codec.encode(codec.SENT, command.id, #command.payload - 1))
 		end
 		return
 	end
@@ -294,14 +336,14 @@ local function handle_command(command)
 	if command.kind == codec.DISCARD_SENDS then
 		if connection then
 			close_stream(connection)
-			discard_unsent_frames(command.id, connection)
+			discard_unsent_frames(command.id, connection, command.value, command.payload)
 		end
 		return
 	end
 
 	if command.kind == codec.START_BUNDLE then
 		if connection then
-			open_bundle_stream(connection, command.payload)
+			open_bundle_stream(connection, command.payload, command.value)
 		end
 		return
 	end
@@ -399,6 +441,10 @@ local function send_to_client(id, connection, budget)
 	local sent_this_pass = 0
 	while #connection.send_queue > 0 and sent_this_pass < budget do
 		local pending = connection.send_queue[1]
+		if connection.sending_frame_id and pending.frame_id ~= connection.sending_frame_id then
+			-- Wait for the rest of a main-thread frame rather than interleave a stream.
+			return true
+		end
 		local remaining_budget = budget - sent_this_pass
 		local bytes = pending.bytes:sub(pending.offset, pending.offset + remaining_budget - 1)
 		local ok, sent_or_error = pcall(connection.socket.send, connection.socket, bytes)
@@ -414,13 +460,19 @@ local function send_to_client(id, connection, budget)
 			return true
 		end
 
+		if pending.frame_id then
+			connection.sending_frame_id = pending.frame_id
+		end
 		pending.offset = pending.offset + sent
 		sent_this_pass = sent_this_pass + sent
 		if pending.offset > #pending.bytes then
 			table.remove(connection.send_queue, 1)
 			acknowledge_pending(id, pending)
+			if pending.frame_end then
+				connection.sending_frame_id = nil
+			end
 			if pending.stream_end then
-				sendMessage(codec.encode(codec.STREAM_DONE, id, 0))
+				sendMessage(codec.encode(codec.STREAM_DONE, id, pending.stream_generation or 0))
 			end
 		else
 			return true

@@ -8,6 +8,7 @@ local M = {
 	CACHE_BUNDLE = 7,
 	SYNC_SNAPSHOT = 8,
 	START_PARTIAL = 9,
+	SEND_FRAME = 10, -- value: logical frame ID; payload: final-fragment byte, then bytes
 	LISTENING = 16,
 	ACCEPTED = 17,
 	DATA = 18,
