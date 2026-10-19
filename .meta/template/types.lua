@@ -104,7 +104,7 @@ end
 ---@field scriptCount integer How many script files are in the sync index.
 ---@field assetFileCount integer How many asset files are in the sync index.
 ---@field loadedLevel string The level name the sync index was built for.
----@field persistentMode string The persistent mode name synced to clients.
+---@field persistentMode string The effective mode synced to clients: server persistent mode, or client config.yml defaultGameMode.
 ---@field port integer The port the SRC TCP server is bound to.
 
 ---A custom human model definition for src.registerHumanModel.

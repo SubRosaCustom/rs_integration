@@ -300,7 +300,7 @@ if not state.hooks_registered then
 		local normalized_persistent_mode = sync_snapshot.normalize_persistent_mode(
 			type(hook) == "table" and hook.persistentMode or nil
 		)
-		if normalized_persistent_mode ~= state.persistent_mode and refresh_automatically() then
+		if normalized_persistent_mode ~= state.server_persistent_mode and refresh_automatically() then
 			log.info(
 				"persistent mode changed to %s; sync refresh queued",
 				state.persistent_mode ~= "" and state.persistent_mode or "<none>"

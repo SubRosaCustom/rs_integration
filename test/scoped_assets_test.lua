@@ -2,6 +2,14 @@
 package.path = './?.lua;' .. package.path
 package.preload['main.json'] = function() return dofile('test/main/json.lua') end
 local files, dirs, links = {}, {}, {}
+-- YAML parsing is supplied by RosaServerCore; mock only that external boundary.
+local yaml_configs = {
+	['defaultGameMode: active'] = { defaultGameMode = 'active' },
+	['defaultGameMode: active.lua'] = { defaultGameMode = 'active.lua' },
+}
+package.preload['main.yaml'] = function() return {
+	parse = function(source) return assert(yaml_configs[source], 'invalid YAML') end,
+} end
 local function add(path, bytes)
 	files[path] = bytes
 	local parent = path:match('^(.*)/[^/]+$')
@@ -50,7 +58,8 @@ if not bit32 then
 	if ok then bit32 = bit else bit32 = assert(load([[return {
 		band = function(a,b) return a & b end,
 		bxor = function(a,b) return a ~ b end,
-		rshift = function(a,b) return a >> b end }]]))() end
+		rshift = function(a,b) return a >> b end,
+		bor = function(...) local n = 0; for i = 1, select('#', ...) do n = n | select(i, ...) end; return n end }]]))() end
 end
 crypto = { sha256 = function(bytes) return 'hash:' .. bytes end }
 package.preload.libminiz = function()
@@ -93,6 +102,49 @@ hook.persistentMode = 'active'
 snapshot.discover(state)
 local hash = state.manifest_hash
 snapshot.discover(state); assert(state.manifest_hash == hash)
+-- Directory/entry read errors must retain the previous published snapshot.
+local saved_list = os.listDirectory
+os.listDirectory = function(root)
+	if root == 'clientroot/scripts/plugins' then error('permission denied') end
+	return saved_list(root)
+end
+local valid_assets, valid_hash = state.asset_files, state.manifest_hash
+assert(not pcall(snapshot.discover, state))
+assert(state.asset_files == valid_assets and state.manifest_hash == valid_hash)
+os.listDirectory = saved_list
+local saved_read = paths.read_file
+paths.read_file = function(path)
+	if path == 'clientroot/scripts/plugins/zeta.lua' then return nil end
+	return saved_read(path)
+end
+assert(not pcall(snapshot.discover, state))
+assert(state.asset_files == valid_assets and state.manifest_hash == valid_hash)
+paths.read_file = saved_read
+-- The fallback comes from the captured client config, and server mode wins.
+hook.persistentMode = ''
+add('clientroot/scripts/config.yml', 'defaultGameMode: active')
+snapshot.discover(state)
+assert(state.server_persistent_mode == '' and state.persistent_mode == 'active')
+assert(state.asset_files_by_path['data/model/mode.cmo'])
+files['clientroot/scripts/config.yml'] = 'defaultGameMode: active.lua'
+snapshot.discover(state)
+assert(state.persistent_mode == 'active' and state.server_persistent_mode == '')
+hook.persistentMode = 'other'
+snapshot.discover(state)
+assert(state.persistent_mode == 'other' and state.server_persistent_mode == 'other')
+assert(state.asset_files_by_path['data/model/other.cmo'])
+hook.persistentMode = ''
+valid_assets, valid_hash = state.asset_files, state.manifest_hash
+files['clientroot/scripts/config.yml'] = 'invalid YAML'
+assert(not pcall(snapshot.discover, state))
+assert(state.asset_files == valid_assets and state.manifest_hash == valid_hash)
+files['clientroot/scripts/config.yml'] = nil
+snapshot.discover(state)
+assert(state.persistent_mode == '' and not state.asset_files_by_path['data/model/mode.cmo'])
+hook.persistentMode = 'active'
+snapshot.discover(state)
+print('plugin I/O rollback and default-mode asset checks passed')
+
 -- Missing/empty roots never fall back to a broad scan.
 hook.persistentMode = 'missing'
 files['clientroot/scripts/disabledPlugins.json'] = '["alpha", "zeta", "disabled"]'
@@ -147,10 +199,17 @@ print('scoped assets: selected owners, toggles, stable paths, collisions, traver
 -- Optional content watching includes assets and the JSON disable list, and catches
 -- newly-created owner subdirectories when its watches are reconciled.
 package.loaded['main.src.log'] = { info = function() end }
-local events, watches = {}, {}
-FILE_WATCH_MODIFY = 1
-FileWatcher = { new = function() return {
-	addWatch = function(_, path) watches[path] = true end,
+local events, watches, watch_calls = {}, {}, {}
+FILE_WATCH_MODIFY, FILE_WATCH_CREATE, FILE_WATCH_DELETE = 1, 2, 4
+FILE_WATCH_MOVE, FILE_WATCH_DELETE_SELF, FILE_WATCH_MOVE_SELF = 8, 16, 32
+local watcher_instances = 0
+FileWatcher = { new = function()
+	watcher_instances = watcher_instances + 1
+	return {
+	addWatch = function(_, path, mask)
+		watches[path] = mask
+		watch_calls[path] = (watch_calls[path] or 0) + 1
+	end,
 	receiveEvent = function() return table.remove(events, 1) end,
 } end }
 local watcher = require('main.src.watcher')
@@ -173,12 +232,41 @@ state.tick = 60; watcher.ensure(state)
 assert(watches['clientroot/assets/plugins/zeta/new/nested'])
 state.tick = 62; watcher.process(state, refreshed)
 assert(refreshes == 3)
-print('scoped content watcher checks passed')
+local mask = watches['clientroot/assets/plugins/zeta']
+for _, event_mask in ipairs({ FILE_WATCH_CREATE, FILE_WATCH_DELETE, FILE_WATCH_MOVE }) do
+	assert(bit32.band(mask, event_mask) == event_mask)
+	state.tick = state.tick + 1
+	local previous_instances = watcher_instances
+	local previous_calls = watch_calls['clientroot/assets/plugins/zeta/new/nested']
+	-- A rename has a temporary filename, not necessarily a supported asset suffix.
+	events[1] = { name = 'save.tmp', mask = event_mask }
+	watcher.process(state, refreshed)
+	assert(watcher_instances == previous_instances + 1)
+	assert(watch_calls['clientroot/assets/plugins/zeta/new/nested'] == previous_calls + 1)
+	local before_refresh = refreshes
+	state.tick = state.tick + 2
+	watcher.process(state, refreshed)
+	assert(refreshes == before_refresh + 1)
+end
+print('scoped content watcher create/delete/rename checks passed')
 
 -- Automatic refresh rejection must back off and return normally, leaving the
 -- main Logic hook free to service existing network connections.
 local init_file = assert(real_open('main/src/init.lua', 'r'))
 local init_source = init_file:read('*a'); init_file:close()
+-- A client fallback differs from the raw server mode without causing a refresh each tick.
+local mode_first = assert(init_source:find('local normalized_persistent_mode = ', 1, true))
+local mode_last = assert(init_source:find('local normalized_loaded_level = ', mode_first, true))
+local mode_check = assert((loadstring or load)('local state, hook, sync_snapshot, refresh_automatically, log = ...\n' ..
+	init_source:sub(mode_first, mode_last - 1)))
+local mode_refreshes = 0
+mode_check({ server_persistent_mode = '', persistent_mode = 'active' }, { persistentMode = '' }, snapshot,
+	function() mode_refreshes = mode_refreshes + 1; return true end, { info = function() end })
+assert(mode_refreshes == 0)
+mode_check({ server_persistent_mode = '', persistent_mode = 'active' }, { persistentMode = 'other' }, snapshot,
+	function() mode_refreshes = mode_refreshes + 1; return true end, { info = function() end })
+assert(mode_refreshes == 1)
+
 local first = assert(init_source:find('local function refresh_automatically()', 1, true))
 local last = assert(init_source:find('\nlocal function disable_runtime', first, true))
 local compile = loadstring or load
