@@ -320,13 +320,20 @@ function M.normalize_persistent_mode(raw_mode)
 	return client_scope.valid_owner(mode) and mode or ""
 end
 
-function M.discover_persistent_mode(state)
+function M.discover_persistent_mode(state, client_config_source)
 	local raw_mode = nil
 	if type(hook) == "table" then
 		raw_mode = hook.persistentMode
 	end
 
-	state.persistent_mode = M.normalize_persistent_mode(raw_mode)
+	state.server_persistent_mode = M.normalize_persistent_mode(raw_mode)
+	state.persistent_mode = state.server_persistent_mode
+	if state.persistent_mode == "" and client_config_source and client_config_source ~= "" then
+		local yaml = require("main.yaml")
+		local ok, client_config = pcall(yaml.parse, client_config_source)
+		assert(ok and type(client_config) == "table", "Invalid client config.yml")
+		state.persistent_mode = M.normalize_persistent_mode(client_config.defaultGameMode)
+	end
 	return state.persistent_mode
 end
 
@@ -425,7 +432,6 @@ local function collect_top_level_vehicle_sbv_files(state, bundle, root, sync_roo
 end
 
 local function build_snapshot(state)
-	M.discover_persistent_mode(state)
 	reset_sync_snapshot(state)
 	local normalized_level = M.normalize_loaded_level(server and server.loadedLevel or nil)
 	state.loaded_level = normalized_level
@@ -447,6 +453,8 @@ local function build_snapshot(state)
 		assert(client_bundle.archive_inputs["disabledPlugins.json"] == disabled_source,
 			"Client disable state changed while building snapshot")
 	end
+	-- Select assets from the same immutable config bytes that core will receive.
+	M.discover_persistent_mode(state, client_bundle.archive_inputs["config.yml"])
 	state.client_plugin_signature = table.concat(enabled, "\n")
 	local function collect_owner(namespace, owner)
 		local root = sync_paths.join(assets_root, namespace .. "/" .. owner)
@@ -512,7 +520,7 @@ function M.discover(state)
 	local next_state = { config = state.config }
 	build_snapshot(next_state)
 	for _, key in ipairs({ "scripts", "scripts_by_path", "asset_files", "asset_files_by_path",
-		"sync_bundles", "sync_bundles_by_id", "loaded_level", "persistent_mode",
+		"sync_bundles", "sync_bundles_by_id", "loaded_level", "persistent_mode", "server_persistent_mode",
 		"client_plugin_signature", "manifest_hash" }) do
 		state[key] = next_state[key]
 	end

@@ -10,7 +10,10 @@ A client plugin exists when `clientRoot/scripts/plugins/<name>.lua` or
 minus the names in `clientRoot/scripts/disabledPlugins.json`. Server-side plugins
 and per-plugin configuration settings do not select client assets. Owner names
 use ASCII letters, digits, `_` and `-` only. The active mode may have a `.lua`
-suffix, which is removed before owner selection.
+suffix, which is removed before owner selection. When the server has no persistent
+mode, the integration selects `defaultGameMode` from the captured client
+`config.yml`. It publishes that effective mode in the existing sync index so core
+starts the mode whose assets were selected. Invalid client YAML rejects the refresh.
 
 The source ownership prefix is stripped. For example,
 `assets/plugins/vehicles/data/model/buggy.cmo` is advertised and cached as
@@ -23,14 +26,14 @@ is unchanged.
 
 Owners and files are enumerated deterministically. Identical logical-path
 collisions are deduplicated; different contents at the same path (or differently-cased aliases) reject the
-refresh, retaining the previous complete snapshot. Malformed disable lists also
+refresh, retaining the previous complete snapshot. Malformed disable lists and failures to enumerate existing plugin directories also
 reject the update. Owner paths cannot escape their roots through symlinks.
 Canonical containment uses LuaJIT's FFI and libc `realpath` on RosaServer/Linux.
 
 Enable/disable commands refresh immediately. Entry-point/disable-list membership
 is checked every 60 server ticks even when optional content watching is disabled.
-With `autoRefreshEnabled`, JSON and supported asset changes now trigger refresh,
-as do script changes. `src.refreshSyncFiles()` remains the explicit full refresh. A targeted plugin reload
+With `autoRefreshEnabled`, file creation, deletion, rename, and modification trigger
+refresh. Directory changes rebuild the watches so recreated paths remain watched. `src.refreshSyncFiles()` remains the explicit full refresh. A targeted plugin reload
 is promoted to a full replay if asset contents or scope membership changed.
 
 Deploy the client, core, and integration changes together. Protocol 9 is unchanged;

@@ -39,14 +39,17 @@ function M.names(config, namespace)
 	local names = {}
 	if not paths.is_contained(config.clientRoot, scripts) or not paths.is_contained(scripts, root) then return names end
 	local ok, entries = pcall(os.listDirectory, root)
-	if not ok or type(entries) ~= "table" then return names end
+	assert(ok and type(entries) == "table", "Cannot inspect client " .. namespace .. " root: " .. root)
 	local found = {}
 	for _, entry in ipairs(entries) do
 		local name = entry.isDirectory and entry.name or entry.name:match("^(.+)%.lua$")
 		if M.valid_owner(name) then
 			local path = paths.join(root, entry.name)
 			if entry.isDirectory then path = paths.join(path, "init.lua") end
-			if paths.is_contained(root, path) and paths.read_file(path) ~= nil then found[name] = true end
+			if paths.is_contained(root, path) then
+				assert(paths.read_file(path) ~= nil, "Cannot read client entry: " .. path)
+				found[name] = true
+			end
 		end
 	end
 	for name in pairs(found) do names[#names + 1] = name end

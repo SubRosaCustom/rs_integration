@@ -2,6 +2,10 @@ local log = require("main.src.log")
 local sync_paths = require("main.src.sync_paths")
 
 local M = {}
+local bitlib = bit32 or require("bit")
+local STRUCTURE_EVENTS = bitlib.bor(FILE_WATCH_CREATE, FILE_WATCH_DELETE,
+	FILE_WATCH_MOVE, FILE_WATCH_DELETE_SELF, FILE_WATCH_MOVE_SELF)
+local WATCH_EVENTS = bitlib.bor(FILE_WATCH_MODIFY, STRUCTURE_EVENTS)
 
 function M.clear(state)
 	state.file_watcher = nil
@@ -20,7 +24,7 @@ local function watch_directory_recursive(state, root, rel)
 	end
 
 	if not state.watched_directories[dir] then
-		state.file_watcher:addWatch(dir, FILE_WATCH_MODIFY)
+		state.file_watcher:addWatch(dir, WATCH_EVENTS)
 		state.watched_directories[dir] = true
 	end
 
@@ -80,17 +84,30 @@ function M.process(state, on_refresh)
 	end
 
 	local changed = false
+	local structure_changed = false
 	while true do
 		local ev = state.file_watcher:receiveEvent()
 		if not ev then
 			break
 		end
 
+		if bitlib.band(ev.mask or 0, STRUCTURE_EVENTS) ~= 0 then
+			structure_changed = true
+			changed = true
+		end
 		if type(ev.name) == "string" and (sync_paths.is_safe_script(ev.name) or sync_paths.is_safe_asset(ev.name)) then
 			changed = true
 		elseif type(ev.descriptor) == "string" and (sync_paths.is_safe_script(ev.descriptor) or sync_paths.is_safe_asset(ev.descriptor)) then
 			changed = true
 		end
+	end
+
+	if structure_changed then
+		-- Renamed/recreated directories need new native watches, even at the same path.
+		local pending_refresh_tick = state.pending_refresh_tick
+		M.clear(state)
+		M.ensure(state)
+		state.pending_refresh_tick = pending_refresh_tick
 	end
 
 	if changed then
