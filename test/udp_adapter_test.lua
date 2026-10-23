@@ -82,3 +82,58 @@ udp.reset_client(client)
 assert(client.udp_reliable == nil and client.udp_token == nil)
 assert(old_peer.bytes == 0)
 print("UDP adapter: 256 KiB event/result, duplicate drain, MTU fallback and reset passed")
+
+-- One native send callback carries both queued events, without advancing wall time.
+client.udp_token = token
+client.udp_events_ready = true
+udp.on_send_packet(state, "127.0.0.1", 27071) -- Initial size probe.
+outbound = {}
+local small = assert(codec.encode_args("small"))
+assert(udp.enqueue(client, assert(udp.encode_reliable_event(event_hash, 201, small))))
+assert(udp.enqueue(client, assert(udp.encode_reliable_result(event_hash, 202, small))))
+udp.on_send_packet(state, "127.0.0.1", 27071)
+assert(#outbound == 1 and #outbound[1] <= 1200 and outbound[1]:byte(45) == 5)
+local reader = reliable.new()
+local messages = reliable.receive(reader, outbound[1]:sub(45))
+assert(#messages == 2 and messages[1].kind ~= messages[2].kind)
+print("UDP adapter: one native send batches event/result without a pacing delay passed")
+
+local function fresh_peer()
+    udp.reset_client(client)
+    client.udp_token, client.udp_events_ready = token, true
+    udp.tick(client)
+    client.udp_reliable.probe_due = time + 60
+    outbound = {}
+    return client.udp_reliable
+end
+local peer = fresh_peer()
+-- Real completed transfers create enough pending receipts to exceed one flush.
+for id = 1, 400 do
+    local fragment = string.pack(">BBI4I2I4I2I2", 1, 1, id, 1, 18, 488, 0) .. string.rep("x",18)
+    assert(#reliable.receive(peer, fragment) == 1)
+    assert(reliable.accept(peer, 1, id))
+end
+udp.on_send_packet(state, "127.0.0.1", 27071)
+assert(#outbound == 8 and next(peer.acks), "Stop at the flush packet budget and retain queued receipts")
+local bytes = 0
+for _, datagram in ipairs(outbound) do assert(#datagram <= 1200); bytes = bytes + #datagram end
+assert(bytes <= 9600)
+outbound = {}
+udp.on_send_packet(state, "127.0.0.1", 27071)
+assert(#outbound > 0 and #outbound <= 8 and not next(peer.acks), "Next send continues without advancing time")
+outbound = {}; udp.on_send_packet(state, "127.0.0.1", 27071); assert(#outbound == 0, "Idle flush sends nothing")
+peer = fresh_peer()
+local medium = assert(codec.encode_args(string.rep("x",400)))
+for id=1,4 do assert(udp.enqueue(client, assert(udp.encode_reliable_event(event_hash,id,medium)))) end
+udp.on_send_packet(state, "127.0.0.1", 27071)
+assert(#outbound == 2, "Congestion window stops a burst before the flush budget")
+outbound={};udp.on_send_packet(state,"127.0.0.1",27071);assert(#outbound==0)
+peer = fresh_peer()
+for id=1,4 do assert(udp.enqueue(client, assert(udp.encode_reliable_event(event_hash,id,medium)))) end
+local original_send,attempts=srcIntegrationNative.sendPacket,0
+srcIntegrationNative.sendPacket=function() attempts=attempts+1;return 0 end
+package.loaded['main.src.log'].warn=function() end -- Expected native send failure boundary.
+udp.on_send_packet(state,"127.0.0.1",27071)
+assert(attempts==1,"Stop flushing after a native send failure")
+srcIntegrationNative.sendPacket=original_send
+print("UDP adapter: multi-datagram budget, carryover, idle, congestion and failed-send stop passed")

@@ -30,7 +30,10 @@ function src.onClientEvent(name, fn) end
 
 ---Emit a server-to-client SRC event.
 ---The server maxEventBytes setting may lower the 256 KiB limit.
----Protocol 8 fragments and retries events over UDP. Delivery is unordered.
+---Protocol 10 fragments and retries events over UDP. Delivery is unordered.
+---Each native send flushes queued fragments and receipts in up to eight size-bounded datagrams
+---per peer (at most 9,600 bytes); congestion limits may stop the flush sooner.
+---No extra transport pacing timer is imposed; congestion windows and retry deadlines still apply.
 ---The complete encoded argument block is limited to 256 KiB, including serialization overhead.
 ---Queue acceptance does not guarantee remote processing.
 ---Disconnects discard pending events; they are not replayed into a new session.
@@ -40,6 +43,18 @@ function src.onClientEvent(name, fn) end
 ---@param ... SrcEventValue The event arguments.
 ---@return integer|boolean sent The number of clients queued when broadcasting, or whether the event was queued for a single player.
 function src.emitClientEvent(player, name, ...) end
+
+---Send replaceable latest state over UDP (protocol 10).
+---Newer unsent values replace older values for the same event name and peer.
+---No receipts, processing results or retries; packet loss can drop the final update.
+---Older sequence IDs are discarded. At most 32 distinct names per session.
+---Encoded arguments are limited to 485 bytes; the server may impose a lower limit.
+---Handled with onServerEvent. Keep permissions and lifecycle actions reliable.
+---@param player Player|nil Target player, or nil for all SRC clients.
+---@param name string
+---@param ... SrcEventValue
+---@return integer|boolean queued Count for broadcast, boolean for a single player.
+function src.emitClientEventLatest(player, name, ...) end
 
 ---Reload a synced client plugin on all connected SRC clients.
 ---@param plugin_name string The plugin file name.

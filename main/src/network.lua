@@ -801,7 +801,7 @@ local function handle_client_event(state, connection, message)
 	}
 end
 
-local function queue_reliable_udp_event(state, connection, name, event_hash, argument_bytes)
+local function queue_reliable_udp_event(state, connection, name, event_hash, argument_bytes, latest)
 	local client = state.clients[connection]
 	if not client or not connection.is_open or not client.hello or not client.bound then
 		return false
@@ -857,6 +857,8 @@ local function queue_reliable_udp_event(state, connection, name, event_hash, arg
 	end
 
 	state.next_event_id = state.next_event_id + 1
+
+	if latest then return udp_events.enqueue_latest(client, bytes) end
 
 	if not udp_events.enqueue(client, bytes) then
 		log.warn("UDP event queue budget exhausted (%s)", name)
@@ -1892,7 +1894,7 @@ function M.on_client_event(state, name, fn)
 	return true
 end
 
-function M.emit_client_event(state, player, name, event_hash, argument_bytes)
+function M.emit_client_event(state, player, name, event_hash, argument_bytes, latest)
 	local args = argument_bytes
 	if type(argument_bytes) == "string" then
 		args = event_codec.decode_args(argument_bytes)
@@ -1906,7 +1908,7 @@ function M.emit_client_event(state, player, name, event_hash, argument_bytes)
 		for connection, client in pairs(state.clients) do
 			if connection.is_open and client.hello and client.bound
 				and validate_bound_player(connection, client) then
-				if queue_reliable_udp_event(state, connection, name, event_hash, args) then
+				if queue_reliable_udp_event(state, connection, name, event_hash, args, latest) then
 					sent = sent + 1
 				end
 			end
@@ -1927,7 +1929,7 @@ function M.emit_client_event(state, player, name, event_hash, argument_bytes)
 		return false
 	end
 
-	return queue_reliable_udp_event(state, connection, name, event_hash, args)
+	return queue_reliable_udp_event(state, connection, name, event_hash, args, latest)
 end
 
 function M.binary(bytes)
@@ -2333,7 +2335,9 @@ function M.on_udp_datagram(state, decoded)
 			return
 		end
 
-		if message.kind == 1 and udp_events.accept(client, message) then
+		if message.latest then
+			handle_client_event(state, connection, message) -- Latest state has no processing result or delivery receipt.
+		elseif message.kind == 1 and udp_events.accept(client, message) then
 			ensure_event_tracking_tables(client)
 			local pending_result = client.pending_results[message.message_id]
 			if pending_result then
