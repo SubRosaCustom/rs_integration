@@ -10,19 +10,27 @@ end
 local function unhex(text)
 	return (text:gsub("..", function(byte) return string.char(tonumber(byte, 16)) end))
 end
+local function latest_payload(id, size)
+    size = size or 40
+    return string.pack(">BBc8I4I4",1,0,"camera01",id,size)..payload(size)
+end
 if arg[1] == "--peer" then
 	local peer = reliable.new()
 	for line in io.lines() do
 		local now, input = line:match("^(%S+) (%S+)$")
 		reliable.advance(peer, tonumber(now), true)
 		local delivered = 0
-		if input:sub(1, 1) == "+" then
-			assert(reliable.enqueue(peer, 1, 17, payload(tonumber(input:sub(2)))))
+		if input:sub(1,1) == "!" then
+            local id=tonumber(input:sub(2));assert(reliable.enqueue_latest(peer,id,latest_payload(id)))
+        elseif input:sub(1, 1) == "+" then
+			local size, count = input:match("^%+(%d+):(%d+)$")
+			size, count = tonumber(size) or tonumber(input:sub(2)), tonumber(count) or 1
+			for i = 1, count do assert(reliable.enqueue(peer, 1, 16 + i, payload(size))) end
 		elseif input ~= "-" then
 			for _, event in ipairs(reliable.receive(peer, unhex(input))) do
-				assert(event.bytes == payload(#event.bytes))
+				assert(event.bytes == (event.latest and latest_payload(event.id) or payload(#event.bytes)))
 				delivered = delivered + 1
-				reliable.accept(peer, event.kind, event.id)
+				if not event.latest then reliable.accept(peer, event.kind, event.id) end
 			end
 		end
 		local packet = reliable.next(peer)
@@ -133,3 +141,49 @@ reliable.advance(cached, 0, true)
 reliable.advance(cached, 241, true)
 assert(#reliable.receive(cached, result) == 0 and cached.error)
 print("Lua UDP malformed/duplicate/quota/expiry checks passed")
+
+local sender, receiver = reliable.new(), reliable.new()
+reliable.advance(sender, 0, true); reliable.advance(receiver, 0, true)
+local a, b = reliable.next(sender), reliable.next(receiver)
+reliable.receive(sender, b); reliable.receive(receiver, a)
+reliable.receive(sender, reliable.next(receiver)); reliable.receive(receiver, reliable.next(sender))
+assert(reliable.enqueue(sender, 1, 1, payload(100)))
+assert(reliable.enqueue(sender, 3, 2, payload(100)))
+local batch = assert(reliable.next(sender))
+assert(batch:byte(1) == 5 and #batch + 44 <= 1200)
+local deliveries = reliable.receive(receiver, batch); assert(#deliveries == 2)
+for _, event in ipairs(deliveries) do assert(reliable.accept(receiver, event.kind, event.id)) end
+assert(reliable.enqueue(receiver, 1, 3, payload(100)))
+local mixed = assert(reliable.next(receiver)); assert(mixed:byte(1) == 5)
+assert(#reliable.receive(sender, mixed) == 1 and #reliable.take_receipts(sender) == 2)
+assert(reliable.enqueue(sender, 1, 4, payload(18)))
+assert(reliable.next(sender), "Another native send must work without a clock advance")
+local budget = reliable.new()
+assert(#reliable.receive(budget, batch, 199) == 0 and budget.error)
+for _, malformed in ipairs({batch:sub(1,-2), batch .. "x", string.pack(">BI2I2",5,2,5) .. string.char(5,0,0,0,0) .. string.pack(">I2",5) .. string.char(4,0,0,0,0)}) do
+    local invalid = reliable.new()
+    assert(#reliable.receive(invalid, malformed) == 0 and invalid.error)
+end
+local spill = reliable.new(); reliable.advance(spill, 0, true); reliable.next(spill)
+assert(reliable.enqueue(spill, 1, 5, payload(300)) and reliable.enqueue(spill, 1, 6, payload(300)))
+local first, second = reliable.next(spill), reliable.next(spill)
+assert(first and second and first ~= second and #first + 44 <= 548 and #second + 44 <= 548)
+print("Lua UDP batching: mixed frames, per-send cadence, overflow, malformed batches and aggregate budget passed")
+
+local latest_sender, latest_receiver = reliable.new(), reliable.new()
+reliable.advance(latest_sender,0,true);reliable.next(latest_sender)
+assert(reliable.enqueue_latest(latest_sender,1,latest_payload(1)))
+assert(reliable.enqueue_latest(latest_sender,2,latest_payload(2)))
+local newest=assert(reliable.next(latest_sender));assert(newest:byte(1)==6)
+local updates=reliable.receive(latest_receiver,newest)
+assert(#updates==1 and updates[1].latest and updates[1].id==2 and updates[1].bytes==latest_payload(2))
+assert(not reliable.next(latest_receiver) and #reliable.take_receipts(latest_receiver)==0)
+assert(#reliable.receive(latest_receiver,newest)==0)
+assert(reliable.enqueue_latest(latest_sender,1,latest_payload(1)))
+assert(#reliable.receive(latest_receiver,reliable.next(latest_sender))==0)
+reliable.advance(latest_sender,.5,true);assert(not reliable.next(latest_sender))
+assert(latest_sender.bytes==0 and latest_receiver.bytes==0)
+assert(reliable.enqueue_latest(latest_sender,3,latest_payload(3,485)))
+assert(#reliable.next(latest_sender)+44<=548)
+assert(not reliable.enqueue_latest(latest_sender,4,latest_payload(4,486)))
+print("Latest state: replacement, reordering, duplicates, size bounds, no receipts or retries passed")

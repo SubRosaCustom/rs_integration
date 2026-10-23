@@ -207,5 +207,5 @@ for _, connection in ipairs({ pending, bound }) do
 end
 assert(not raw.discarded and #raw_client.send_queue == 2)
 assert(not closed.discarded and not invalid.is_open)
-assert(require("main.src.protocol").VERSION == 9)
+assert(require("main.src.protocol").VERSION == 10)
 print("refresh cancellation and TCP frame preservation checks passed")

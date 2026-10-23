@@ -11,5 +11,5 @@ for _, path in ipairs({ "../head.cmo", "/data/head.cmo", "data\\head.cmo", "C:/d
 end
 assert(not pcall(config.resolve, { disallowedPaths = { [1] = "data/a", [3] = "data/b" } }))
 assert(not pcall(config.resolve, { disallowedPaths = { key = "data/a" } }))
-assert(require("main.src.protocol").VERSION == 9)
+assert(require("main.src.protocol").VERSION == 10)
 print("resource pack policy contract passed")

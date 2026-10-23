@@ -1,4 +1,6 @@
-# Resource pack policy (SRC protocol 9)
+# Resource pack policy (introduced in SRC protocol 9)
+
+Current protocol 10 retains this policy schema and adds replaceable latest-state UDP events; see [reliable UDP](reliable_udp.md). Upgrade client and integration together.
 
 Local packs replace existing client resource slots. The server does not register or request pack-only resources. Policy is configured under the existing `src` configuration:
 
@@ -16,7 +18,7 @@ The integration sends the entire `disallowedPaths` snapshot in `HELLO_ACK`, `IND
 
 A blocked file restores the current normal source. A matching synced server asset wins over a local ZIP. Explicit server assignments retain ownership of their native destination even if their filename differs from the original stock path. Failed winning pack files restore normal loading rather than revealing a lower-priority pack. Other resource paths continue. Transport reconnection retains policy; actual client session departure clears it.
 
-Protocol 9 requires these fields and rejects invalid/missing client-side policy snapshots. Its message names and reliable-UDP transport retain the protocol 8 contract. **Deploy client and integration together.** Version 8 peers fail the existing protocol version check. Rollback must also pair both modules. No core or launcher API change is needed.
+Protocol 9 requires these fields and rejects invalid/missing client-side policy snapshots. Its message names retain the protocol 8 contract; current protocol 10 supports reliable-UDP batching and latest-state events. **Deploy client and integration together.** Version 8 peers fail the existing protocol version check. Rollback must also pair both modules. No core or launcher API change is needed.
 
 This policy governs the SRC implementation on participating clients. It is not remote attestation of a player's installation or protection against an independently modified client.
 

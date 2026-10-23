@@ -124,7 +124,7 @@ function src.onClientEvent(name, fn)
 	return network.on_client_event(state, name, fn)
 end
 
-function src.emitClientEvent(player, name, ...)
+local function emit_client_event(latest, player, name, ...)
 	if player ~= nil then
 		assert(type(player) == "userdata" and player.class == "Player", "src.emitClientEvent(player, ...): player must be Player or nil")
 		assert(not player.isBot, "src.emitClientEvent(player, ...): player cannot be a bot")
@@ -139,7 +139,14 @@ function src.emitClientEvent(player, name, ...)
 	local argument_bytes, encode_error = event_codec.encode_args(...)
 	assert(argument_bytes ~= nil, "src.emitClientEvent(player, name, ...): " .. tostring(encode_error))
 
-	return network.emit_client_event(state, player, name, hash, argument_bytes)
+	return network.emit_client_event(state, player, name, hash, argument_bytes, latest)
+end
+
+function src.emitClientEvent(player, name, ...)
+	return emit_client_event(false, player, name, ...)
+end
+function src.emitClientEventLatest(player, name, ...)
+	return emit_client_event(true, player, name, ...)
 end
 
 world_mutations.install(state, src)

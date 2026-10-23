@@ -36,9 +36,11 @@ With `autoRefreshEnabled`, file creation, deletion, rename, and modification tri
 refresh. Directory changes rebuild the watches so recreated paths remain watched. `src.refreshSyncFiles()` remains the explicit full refresh. A targeted plugin reload
 is promoted to a full replay if asset contents or scope membership changed.
 
-Deploy the client, core, and integration changes together. Protocol 9 is unchanged;
-new manifests remain valid protocol-9 subsets, but the updated client is needed
-for interrupted-transfer cleanup and resource-ownership reconciliation.
+Deploy the client, core, and integration changes together. The scoped-asset manifest
+schema introduced with protocol 9 is unchanged in protocol 10. Protocol 10 adds UDP
+frame batching and requires a matching client/integration upgrade; see
+[reliable UDP](reliable_udp.md). The updated client is also needed for
+interrupted-transfer cleanup and resource-ownership reconciliation.
 
 Host regression test:
 

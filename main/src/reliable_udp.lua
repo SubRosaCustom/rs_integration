@@ -1,4 +1,4 @@
--- Protocol 8 transport. Wire layout and limits match client/sync/reliable_udp.cpp.
+-- Protocol 10 transport. Wire layout and limits match client/sync/reliable_udp.cpp.
 local M = {}
 local MAX_MESSAGE_BYTES = 256 * 1024 + 18
 local MAX_BUFFERED_BYTES = 1024 * 1024
@@ -35,9 +35,9 @@ end
 
 function M.new()
 	return {
-		outbound = {}, inbound = {}, completed = {}, retired = {}, acks = {}, receipts = {},
+		outbound = {}, inbound = {}, completed = {}, retired = {}, acks = {}, receipts = {}, latest = {}, latest_received = {},
 		bytes = 0, now = 0, wall = -1, active = false, large = false,
-		next_send = 0, probe_sent = -1, probe_due = 0, probe_id = 0, probe_attempts = 0,
+		probe_sent = -1, probe_due = 0, probe_id = 0, probe_attempts = 0,
 		window = 2, rtt = 0.1, cursor = 0, retry_base = 1 / 3, retry_attempts = 5,
 	}
 end
@@ -61,6 +61,19 @@ function M.enqueue(peer, kind, id, bytes)
 		pieces = pieces(math.ceil(#bytes / chunk)), created = peer.now, probe_at = -1, probes = 0,
 	}
 	peer.bytes = peer.bytes + #bytes
+	return true
+end
+
+function M.enqueue_latest(peer, id, bytes)
+	if peer.error or type(bytes) ~= "string" or #bytes < 18 or #bytes > 503 or id < 1 or id > 0xFFFFFFFF
+		or bytes:byte(1) ~= 1 or bytes:byte(2) ~= 0 or string.unpack(">I4",bytes,11) ~= id
+		or string.unpack(">I4",bytes,15) ~= #bytes - 18 then return false end
+	local name = bytes:sub(3,10)
+	local previous = peer.latest[name]
+	if not previous and count_entries(peer.latest) >= 32 then return false end
+	local size = peer.bytes - (previous and #previous or 0) + #bytes
+	if size > MAX_BUFFERED_BYTES then return false end
+	peer.bytes = size; peer.latest[name] = bytes
 	return true
 end
 
@@ -126,17 +139,18 @@ local function ack(peer, transfer, complete)
 	) .. table.concat(bitmap)
 end
 
-function M.next(peer)
-	if peer.error or peer.now < peer.next_send then
+local function next_frame(peer, max_bytes)
+	if peer.error then
 		return nil
 	end
-	peer.next_send = peer.now + 0.005
 	local ack_key, ack_bytes = next(peer.acks)
 	if ack_key then
+		if #ack_bytes > max_bytes then return nil end
 		peer.acks[ack_key] = nil
 		return ack_bytes
 	end
 	if peer.probe_reply then
+		if #peer.probe_reply > max_bytes then return nil end
 		local packet = peer.probe_reply
 		peer.probe_reply = nil
 		return packet
@@ -154,12 +168,19 @@ function M.next(peer)
 				peer.probe_sent = -1
 			end
 		else
+			if max_bytes < 1156 then return nil end
 			if peer.probe_attempts == 0 then
 				peer.probe_id = peer.probe_id % 0xFFFFFFFF + 1
 			end
 			peer.probe_attempts = peer.probe_attempts + 1
 			peer.probe_sent = peer.now
 			return string.pack(">BI4", 3, peer.probe_id) .. string.rep("\0", 1151)
+		end
+	end
+	for name, bytes in pairs(peer.latest) do
+		if #bytes + 1 <= max_bytes then
+			peer.latest[name] = nil; peer.bytes = peer.bytes - #bytes
+			return string.char(6) .. bytes
 		end
 	end
 	local in_flight = 0
@@ -201,10 +222,10 @@ function M.next(peer)
 				return nil
 			end
 			selected = #transfer.pieces
-			transfer.probe_at = peer.now
-			transfer.probes = transfer.probes + 1
 		end
-		if selected then
+		local frame_bytes = selected and (16 + math.min(transfer.chunk, transfer.total - (selected - 1) * transfer.chunk))
+		if selected and frame_bytes <= max_bytes then
+			if all_acked then transfer.probe_at = peer.now; transfer.probes = transfer.probes + 1 end
 			local piece = transfer.pieces[selected]
 			if not all_acked and piece.attempts >= 3 and transfer.chunk == LARGE_CHUNK then
 				fallback(peer)
@@ -220,7 +241,6 @@ function M.next(peer)
 			piece.sent = peer.now
 			piece.attempts = piece.attempts + 1
 			peer.cursor = transfer_key
-			peer.next_send = peer.now + math.max(0.005, peer.rtt / peer.window)
 			return string.pack(">BBI4I2I4I2I2", 1, transfer.kind, transfer.id,
 				transfer.generation, transfer.total, transfer.chunk, selected - 1
 			) .. transfer.bytes:sub((selected - 1) * transfer.chunk + 1, selected * transfer.chunk)
@@ -229,12 +249,65 @@ function M.next(peer)
 	return nil
 end
 
+function M.next(peer)
+	local first = next_frame(peer, 1156)
+	local budget = peer.large and 1156 or 504
+	if not first or #first + 5 > budget then return first end
+	local parts = { string.pack(">I2", #first), first }
+	local size, count = 3 + 2 + #first, 1
+	while size + 2 < budget do
+		local frame = next_frame(peer, budget - size - 2)
+		if not frame then break end
+		parts[#parts + 1] = string.pack(">I2", #frame)
+		parts[#parts + 1] = frame
+		size, count = size + 2 + #frame, count + 1
+	end
+	if peer.error then return nil end
+	if count == 1 then return first end
+	return string.pack(">BI2", 5, count) .. table.concat(parts)
+end
+
 function M.receive(peer, packet, available_bytes)
 	available_bytes = available_bytes or MAX_BUFFERED_BYTES
 	if peer.error or #packet == 0 or #packet > 1156 then
 		return {}
 	end
 	local packet_type = packet:byte(1)
+	if packet_type == 5 then
+		if #packet < 3 then fail(peer, "short UDP batch"); return {} end
+		local count, pos = string.unpack(">I2", packet, 2)
+		if count < 2 or count > math.floor((#packet - 3) / 7) then fail(peer, "invalid UDP batch count"); return {} end
+		local frames = {}
+		for i = 1, count do
+			if pos + 1 > #packet then fail(peer, "short UDP batch length"); return {} end
+			local length; length, pos = string.unpack(">I2", packet, pos)
+			if length < 5 or length > #packet - pos + 1 or packet:byte(pos) == 5 then
+				fail(peer, "invalid UDP batch frame"); return {}
+			end
+			frames[i] = packet:sub(pos, pos + length - 1); pos = pos + length
+		end
+		if pos ~= #packet + 1 then fail(peer, "trailing UDP batch bytes"); return {} end
+		local deliveries, initial_bytes = {}, peer.bytes
+		for _, frame in ipairs(frames) do
+			local reserved = math.max(0, peer.bytes - initial_bytes)
+			local completed = M.receive(peer, frame, math.max(0, available_bytes - reserved))
+			if peer.error then return {} end
+			for _, delivery in ipairs(completed) do deliveries[#deliveries + 1] = delivery end
+		end
+		return deliveries
+	end
+	if packet_type == 6 then
+		if #packet < 19 or #packet > 504 or packet:byte(2) ~= 1 or packet:byte(3) ~= 0
+			or string.unpack(">I4",packet,16) ~= #packet - 19 or string.unpack(">I4",packet,12) == 0 then
+			fail(peer,"invalid latest-state UDP message"); return {}
+		end
+		local name, id = packet:sub(4,11), string.unpack(">I4",packet,12)
+		local previous = peer.latest_received[name]
+		if previous and id <= previous then return {} end
+		if not previous and count_entries(peer.latest_received) >= 32 then fail(peer,"latest-state UDP channel budget exhausted"); return {} end
+		peer.latest_received[name] = id
+		return {{kind=1,id=id,bytes=packet:sub(2),latest=true}}
+	end
 	if packet_type == 3 or packet_type == 4 then
 		if #packet ~= (packet_type == 3 and 1156 or 5) then
 			fail(peer, "invalid UDP MTU probe")

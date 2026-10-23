@@ -22,6 +22,7 @@ local function get_peer(client)
 end
 
 local MAX_DATAGRAM_SIZE = 1200
+local MAX_FLUSH_DATAGRAMS = 8 -- At most 9,600 bytes per peer/native send.
 local DATAGRAM_HEADER_SIZE = 44
 local MAX_BATCH_SIZE = MAX_DATAGRAM_SIZE - DATAGRAM_HEADER_SIZE
 local GAME_MAGIC = "7DFP"
@@ -201,6 +202,13 @@ function M.enqueue(client, encoded_message)
 	return reliable_udp.enqueue(get_peer(client), kind, id, encoded_message)
 end
 
+function M.enqueue_latest(client, encoded_message)
+	if not client or type(encoded_message) ~= "string" or #encoded_message < 18 then return false end
+	local _, _, _, id = string.unpack(">BBc8I4", encoded_message)
+	if buffered_bytes() + #encoded_message > 16 * 1024 * 1024 then return false end
+	return reliable_udp.enqueue_latest(get_peer(client), id, encoded_message)
+end
+
 function M.accept(client, message)
 	return reliable_udp.accept(get_peer(client), message.kind, message.message_id)
 end
@@ -272,18 +280,19 @@ function M.on_send_packet(state, address, port)
 			return
 		end
 	M.tick(client, state.config)
-	local packet = reliable_udp.next(get_peer(client))
-	if not packet then
-		return
-	end
-	local datagram, encode_error = build_datagram(client.udp_token, packet)
-	if not datagram then
-		log.warn("failed to build UDP datagram: %s", tostring(encode_error))
-		return
-	end
-	local ok, sent = pcall(native.sendPacket, tostring(address), normalize_port(port), datagram)
-	if not ok or sent ~= #datagram then
-		log.warn("UDP send attempt failed: %s", tostring(sent))
+	for _ = 1, MAX_FLUSH_DATAGRAMS do
+		local packet = reliable_udp.next(get_peer(client))
+		if not packet then break end
+		local datagram, encode_error = build_datagram(client.udp_token, packet)
+		if not datagram then
+			log.warn("failed to build UDP datagram: %s", tostring(encode_error))
+			break
+		end
+		local ok, sent = pcall(native.sendPacket, tostring(address), normalize_port(port), datagram)
+		if not ok or sent ~= #datagram then
+			log.warn("UDP send attempt failed: %s", tostring(sent))
+			break
+		end
 	end
 end
 
@@ -337,6 +346,7 @@ function M.on_packet_receive(state)
 					peer.error = decode_error or "invalid reassembled UDP event"
 					break
 				end
+				message.latest = delivery.latest
 				messages[#messages + 1] = message
 			end
 			for _, receipt in ipairs(reliable_udp.take_receipts(peer)) do
