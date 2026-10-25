@@ -35,7 +35,8 @@ end
 
 function M.new()
 	return {
-		outbound = {}, inbound = {}, completed = {}, retired = {}, acks = {}, receipts = {}, latest = {}, latest_received = {},
+		outbound = {}, inbound = {}, completed = {}, retired = {}, acks = {}, receipts = {},
+		latest = {}, latest_sent = {}, latest_received = {},
 		bytes = 0, now = 0, wall = -1, active = false, large = false,
 		probe_sent = -1, probe_due = 0, probe_id = 0, probe_attempts = 0,
 		window = 2, rtt = 0.1, cursor = 0, retry_base = 1 / 3, retry_attempts = 5,
@@ -70,9 +71,10 @@ function M.enqueue_latest(peer, id, bytes)
 		or string.unpack(">I4",bytes,15) ~= #bytes - 18 then return false end
 	local name = bytes:sub(3,10)
 	local previous = peer.latest[name]
-	if not previous and count_entries(peer.latest) >= 32 then return false end
+	if not peer.latest_sent[name] and count_entries(peer.latest_sent) >= 32 then return false end
 	local size = peer.bytes - (previous and #previous or 0) + #bytes
 	if size > MAX_BUFFERED_BYTES then return false end
+	peer.latest_sent[name] = true
 	peer.bytes = size; peer.latest[name] = bytes
 	return true
 end
