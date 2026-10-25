@@ -25,6 +25,8 @@ jobs:
       - name: Scoped sync regressions
         run: |
           lua5.4 test/scoped_assets_test.lua
+          lua5.4 test/scoped_item_files_test.lua
+          lua5.4 test/item_types_new_test.lua
           lua5.4 test/tests/refresh_cancellation.lua
 
       - name: Test

@@ -519,7 +519,7 @@ function M.discover(state)
 	-- A conflict or malformed scope must not replace a valid published snapshot.
 	local next_state = { config = state.config }
 	build_snapshot(next_state)
-	for _, key in ipairs({ "scripts", "scripts_by_path", "asset_files", "asset_files_by_path",
+	for _, key in ipairs({ "scripts", "scripts_by_path", "asset_files", "asset_files_by_path", "asset_paths_folded",
 		"sync_bundles", "sync_bundles_by_id", "loaded_level", "persistent_mode", "server_persistent_mode",
 		"client_plugin_signature", "manifest_hash" }) do
 		state[key] = next_state[key]

@@ -34,6 +34,23 @@ authorized=false
 env.M.on_udp_datagram(state,{connection=connection,client=client,messages={{kind=1,latest=true}}})
 assert(calls==1,'Bound-player authorization still applies')
 print('Latest server path: queue/dispatch, no results/receipts, replacement and authorization passed')
+-- Flushing messages must not free their session-scoped channel budget.
+local sender, target = r.new(), r.new()
+r.advance(sender, 0, true)
+assert(r.next(sender)) -- Consume the startup size probe.
+local function latest_message(id, name)
+	return string.pack('>BBc8I4I4', 1, 0, name, id, 0)
+end
+for id = 1, 32 do
+	assert(r.enqueue_latest(sender, id, latest_message(id, string.format('%08d', id))))
+	assert(#r.receive(target, assert(r.next(sender))) == 1)
+end
+assert(not r.enqueue_latest(sender, 33, latest_message(33, '00000033')))
+assert(sender.bytes == 0 and not sender.error and not target.error)
+assert(r.enqueue_latest(sender, 34, latest_message(34, '00000001')))
+assert(#r.receive(target, assert(r.next(sender))) == 1)
+assert(r.enqueue_latest(r.new(), 33, latest_message(33, '00000033')))
+print('Latest-state channel budget survives flushes and resets with the session')
 -- Exercise public wrappers and shared serializers from production source.
 local core_source=read('../core/main/init.lua')
 local core_emit=assert(core_source:match('(local function emit_server_event.-)\nfunction __src_dispatch_server_event'))

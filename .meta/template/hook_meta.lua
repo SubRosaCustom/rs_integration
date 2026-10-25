@@ -2,6 +2,8 @@
 --# selene: allow(unscoped_variables)
 ---@meta
 
+-- See globals.lua for the published baseline and LOCAL-ONLY availability notes.
+
 -- Hooks added to the RosaServer hook system by rs_integration.
 -- Base hook aliases (Logic, ConfigLoaded, ...) come from RosaServerCore.
 

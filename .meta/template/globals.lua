@@ -2,6 +2,10 @@
 --# selene: allow(unscoped_variables)
 ---@meta
 
+-- Metadata follows this local checkout. Published baseline checked on 2026-10-25:
+-- 3053f88a4dcb31625c018ea6e143e3b4ac241ffe (control protocol 9). LOCAL-ONLY notes identify
+-- additions or behavior absent from that baseline; they are not release guarantees.
+
 -- Globals added to the RosaServer Lua runtime by rs_integration.
 -- These sit on top of the base RosaServer API (see the RosaServerCore .meta).
 
@@ -12,10 +16,10 @@
 src = {}
 
 ---Queue a sync refresh for all connected SRC clients using the current
----file index.
+---file index. This does not rescan changed files.
 function src.refresh() end
 
----Re-discover the synced script/asset file index from clientRoot, then
+---Re-discover scripts and selected mode/plugin assets under clientRoot, then
 ---queue a sync refresh for all connected SRC clients.
 function src.refreshSyncFiles() end
 
@@ -30,7 +34,8 @@ function src.onClientEvent(name, fn) end
 
 ---Emit a server-to-client SRC event.
 ---The server maxEventBytes setting may lower the 256 KiB limit.
----Protocol 10 fragments and retries events over UDP. Delivery is unordered.
+---Ordinary reliable events exist in the published baseline; delivery is unordered.
+---LOCAL-ONLY transport policy below describes protocol 10, not published protocol 9.
 ---Each native send flushes queued fragments and receipts in up to eight size-bounded datagrams
 ---per peer (at most 9,600 bytes); congestion limits may stop the flush sooner.
 ---No extra transport pacing timer is imposed; congestion windows and retry deadlines still apply.
@@ -44,7 +49,8 @@ function src.onClientEvent(name, fn) end
 ---@return integer|boolean sent The number of clients queued when broadcasting, or whether the event was queued for a single player.
 function src.emitClientEvent(player, name, ...) end
 
----Send replaceable latest state over UDP (protocol 10).
+---LOCAL-ONLY API: absent from the published protocol-9 baseline.
+---Send replaceable latest state over UDP (protocol 10); requires matching client/integration.
 ---Newer unsent values replace older values for the same event name and peer.
 ---No receipts, processing results or retries; packet loss can drop the final update.
 ---Older sequence IDs are discarded. At most 32 distinct names per session.
@@ -56,7 +62,8 @@ function src.emitClientEvent(player, name, ...) end
 ---@return integer|boolean queued Count for broadcast, boolean for a single player.
 function src.emitClientEventLatest(player, name, ...) end
 
----Reload a synced client plugin on all connected SRC clients.
+---Request a synced client plugin reload on all connected SRC clients.
+---Asset contents, selected owners, effective mode or level changes promote it to a full replay.
 ---@param plugin_name string The plugin file name.
 function src.reloadClientPlugin(plugin_name) end
 
@@ -79,41 +86,50 @@ function src.syncClientVehicleTypes(player, payload) end
 ---Build and send the current custom item type set to clients.
 ---@param player? Player The target player, or nil to broadcast.
 ---@return integer|boolean sent Empty type sets are also sent to clear previous definitions.
+---LOCAL-ONLY behavior: definitions with file assignments outside the active asset manifest
+---are omitted until those assets return; the published baseline does not apply this filter.
 function src.syncCustomItemTypes(player) end
 
 ---Assign a client-side CMO model to an item type and sync it.
 ---Replaces any previous CMO, ITM, or IT3 model assignment for this type.
----Synced paths must match the current manifest; a bare filename must be unique.
+---Synced paths must match the current manifest exactly.
 ---@param indexOrType integer|ItemType The item type to assign to (0-254).
 ---@param modelName string The CMO model name, resolved from the synced assets.
----@param player? Player The target player, or nil to broadcast.
+---@param player? Player Limits the immediate send only. Shared assignment state changes for future syncs; nil broadcasts.
 ---@return integer|boolean sent
 function src.setItemTypeModel(indexOrType, modelName, player) end
 
 ---Assign a client-side inventory icon texture to an item type and sync it.
 ---@param indexOrType integer|ItemType The item type to assign to (0-254).
 ---@param iconPath string The synced asset path of the icon, ex. "texture/icon-foo.png".
----@param player? Player The target player, or nil to broadcast.
+---@param player? Player Limits the immediate send only. Shared assignment state changes for future syncs; nil broadcasts.
 ---@return integer|boolean sent
 function src.setItemTypeIcon(indexOrType, iconPath, player) end
 
 ---Assign an .itm definition file to an item type, apply it server-side, and
----sync it to clients.
+---sync it to clients. ITM supplies render geometry/markers; it does not create
+---the stock startup box collision mesh for a fresh item type.
 ---Replaces any previous CMO, ITM, or IT3 model assignment for this type.
----Synced paths must match the current manifest; a bare filename must be unique.
+---Synced paths must match the current manifest exactly.
 ---@param indexOrType integer|ItemType The item type to assign to (0-254).
----@param itmPath string A forward-slash path ending in .itm, resolved against clientRoot.
----@param player? Player The target player, or nil to broadcast.
+---LOCAL-ONLY behavior: matching logical manifest paths resolve to their owning server file.
+---Published fallback lookup tries the supplied path, assets root + path, then clientRoot + path.
+---Both versions transmit the supplied logical path unchanged; avoid sending ownership prefixes.
+---@param itmPath string A logical synced asset path ending in .itm.
+---@param player? Player Limits the immediate send only. Shared assignment state changes for future syncs; nil broadcasts.
 ---@return integer|boolean sent
 function src.setItemTypeITM(indexOrType, itmPath, player) end
 
 ---Assign an .it3 definition file to an item type, apply it server-side, and
 ---sync it to clients.
 ---Replaces any previous CMO, ITM, or IT3 model assignment for this type.
----Synced paths must match the current manifest; a bare filename must be unique.
+---Synced paths must match the current manifest exactly.
 ---@param indexOrType integer|ItemType The item type to assign to (0-254).
----@param it3Path string A forward-slash path ending in .it3, resolved against clientRoot.
----@param player? Player The target player, or nil to broadcast.
+---LOCAL-ONLY behavior: matching logical manifest paths resolve to their owning server file.
+---Published fallback lookup tries the supplied path, assets root + path, then clientRoot + path.
+---Both versions transmit the supplied logical path unchanged; avoid sending ownership prefixes.
+---@param it3Path string A logical synced asset path ending in .it3.
+---@param player? Player Limits the immediate send only. Shared assignment state changes for future syncs; nil broadcasts.
 ---@return integer|boolean sent
 function src.setItemTypeIT3(indexOrType, it3Path, player) end
 
@@ -122,14 +138,14 @@ function src.setItemTypeIT3(indexOrType, it3Path, player) end
 ---Builtin textures are available without first rendering a vanilla item.
 ---@param indexOrType integer|ItemType The item type to assign to (0-254).
 ---@param textureRef string A builtin texture name (gun_tex, grenade, soccerball, watermelon, tex_2) or a synced texture file path.
----@param player? Player The target player, or nil to broadcast.
+---@param player? Player Limits the immediate send only. Shared assignment state changes for future syncs; nil broadcasts.
 ---@return integer|boolean sent
 function src.setItemTypeTexture(indexOrType, textureRef, player) end
 
 ---Assign custom gunshot sounds to an item type and sync them.
 ---@param indexOrType integer|ItemType The item type to assign to (0-254).
 ---@param soundPaths string|string[] A builtin sound name, one synced .wav path, or up to 6 synced .wav paths.
----@param player? Player The target player, or nil to broadcast.
+---@param player? Player Limits the immediate send only. Shared assignment state changes for future syncs; nil broadcasts.
 ---@return integer|boolean sent
 function src.setItemTypeFireSounds(indexOrType, soundPaths, player) end
 
@@ -140,15 +156,15 @@ function src.syncCustomVehicleTypes(player) end
 
 ---Assign a client-side model to a vehicle type and sync it.
 ---@param indexOrType integer|VehicleType The vehicle type to assign to (0-127).
----@param modelName string The model name, resolved from the synced assets.
----@param player? Player The target player, or nil to broadcast.
+---@param modelName string Bare SBV name, without path or extension. Requires server file data/<name>.sbv.
+---@param player? Player Limits the immediate send only. Shared assignment state changes for future syncs; nil broadcasts.
 ---@return integer|boolean sent
 function src.setVehicleTypeModel(indexOrType, modelName, player) end
 
 ---Assign client-side engine audio to a vehicle type and sync it.
 ---@param indexOrType integer|VehicleType The vehicle type to assign to (0-127).
 ---@param audioRef string The audio reference name.
----@param player? Player The target player, or nil to broadcast.
+---@param player? Player Limits the immediate send only. Shared assignment state changes for future syncs; nil broadcasts.
 ---@return integer|boolean sent
 function src.setVehicleTypeAudio(indexOrType, audioRef, player) end
 
@@ -208,6 +224,25 @@ function src.binary(bytes) end
 ---@return SrcBlob blob The wrapped binary payload.
 function src.blob(bytes) end
 
+---LOCAL-ONLY API in the current uncommitted item_types.lua; absent from published source.
+---Create a fresh zero-initialized custom item type in an automatically allocated
+---slot (46-254), apply fields, and sync it to SRC clients. No stock definition is cloned.
+---Defaults: mass 0.1, collision enabled, numHands 1 and isOneHanded true.
+---Native pocket slots 3-6 are enabled; slot 2 (gun holster) is disabled.
+---Both grips use the stock phone's native handheld axis-angle calibration.
+---Assign collision/render geometry with src.setItemTypeIT3 before creating fresh physical items.
+---ITM loading supplies render geometry/anchors only; it does not build the stock startup box collider.
+---Added to the RosaServer itemTypes library by rs_integration.
+---@param name string Item name, 1-63 bytes without NUL.
+---@param fields? SrcNewItemTypeFields Definition fields; mass must be finite and positive, numHands must be 0-2. Pass name separately. Hand flags use native writes and do not require userdata setters.
+---@return ItemType itemType The new item type.
+---boundsCenter is the nonnegative collision half-extents, not a center position; defaults to the stock phone bounds.
+---Rotational inertia is derived from those bounds using native catalog setup. If any extent is zero, native unit inertia is used.
+---Before allocation, mass, nonzero bounds and derived inertia must be in the native float range
+---2^-149 through (2-2^-23)*2^127. Zero bounds remain allowed; zero mass/inertia are rejected.
+---IT3/ITM loading does not initialize bounds or recalculate inertia; supply boundsCenter when constructing a differently sized item.
+function itemTypes.new(name, fields) end
+
 ---Clone an existing item type into a custom slot (46-254), optionally
 ---overriding fields, and sync it to SRC clients.
 ---Added to the RosaServer `itemTypes` library by rs_integration.
@@ -227,12 +262,12 @@ function itemTypes.clone(sourceRef, targetIndex, overrides) end
 ---@param price integer How much money is taken when bought.
 ---@param mass number In kilograms, kind of.
 ---@param acceleration number How fast the vehicle can accelerate.
----@param model string The client-side model name, resolved from the synced assets.
+---@param model string Bare SBV name without directory or extension; requires data/<name>.sbv on the server.
 ---@param numSeats integer The number of seats, 0-8.
----@param seatPos SrcSeatPosition[] One position per seat.
+---@param seatPos (Vector|SrcSeatPosition)[] One position per seat; native Vectors and tables are accepted.
 ---@param audio string The engine audio reference name.
----@param wheelRadius? number The wheel radius. Defaults to the runtime default.
----@param wheelMass? number The wheel mass. Defaults to the runtime default.
+---@param wheelRadius? number Positive wheel radius. Defaults to 0.3125.
+---@param wheelMass? number Positive wheel mass. Defaults to 12.
 ---@param index? integer The custom slot to use (17-127). Auto-allocated when omitted.
 ---@return VehicleType vehicleType The created vehicle type.
 function vehicleTypes.new(name, controllableState, usesExternalModel, price, mass, acceleration, model, numSeats, seatPos, audio, wheelRadius, wheelMass, index) end

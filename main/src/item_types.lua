@@ -9,6 +9,8 @@ local ITEM_TYPE_NATIVE_BUFFER_OFFSETS = { 0x13A8, 0x13B0, 0x13C0, 0x13C8, }
 local MAX_ITEM_TYPE_COUNT = 255
 local MAX_ITEM_TYPE_INDEX = MAX_ITEM_TYPE_COUNT - 1
 local FIRST_CUSTOM_INDEX = 46
+local MIN_NATIVE_FLOAT = 2 ^ -149
+local MAX_NATIVE_FLOAT = (2 - 2 ^ -23) * 2 ^ 127
 
 local function safe_read(obj, key)
 	local ok, value = pcall(function()
@@ -222,12 +224,50 @@ local function apply_clone_overrides(target_type, overrides)
 	apply_can_mount_to_overrides(target_type, overrides.canMountTo)
 end
 
+-- Definitions persist on the server; their file assignments belong to the active manifest.
+local function has_active_item_assets(state, index)
+	local assets = state.asset_files_by_path
+	if not assets then return true end
+	local function present(path, suffix, prefix)
+		local candidates = { path, path .. suffix, prefix .. path, prefix .. path .. suffix,
+			"data/" .. path, "data/" .. path .. suffix }
+		for _, candidate in ipairs(candidates) do
+			local folded = state.asset_paths_folded and state.asset_paths_folded[candidate:lower()]
+			if assets[candidate] or (folded and assets[folded]) then return true end
+		end
+		return false
+	end
+	for _, name in ipairs({ "item_type_itm_assignments", "item_type_it3_assignments" }) do
+		local path = (state[name] or {})[index]
+		if path and not present(path, "", "") then return false end
+	end
+	local model = (state.item_type_model_assignments or {})[index]
+	if model then
+		-- The client resolves this logical path exactly, with an optional .cmo suffix.
+		local path = model:sub(-4) == ".cmo" and model or model .. ".cmo"
+		local folded = state.asset_paths_folded and state.asset_paths_folded[path:lower()]
+		if not assets[path] and not (folded and assets[folded]) then return false end
+	end
+	local icon = (state.item_type_icon_assignments or {})[index]
+	if icon and not present(icon, ".png", "texture/") then return false end
+	local texture = (state.item_type_texture_assignments or {})[index]
+	if texture and texture.kind == "file" and not present(texture.file, ".png", "texture/") then return false end
+	local sounds = (state.item_type_fire_sound_assignments or {})[index]
+	if sounds and sounds.kind == "files" then
+		for _, path in ipairs(sounds.files) do
+			if not present(path, ".wav", "sound/") then return false end
+		end
+	end
+	return true
+end
+
 function M.build_sync_payload(state)
 	local entries_by_index = state.custom_item_types_by_index or {}
 	local item_type_entries = {}
 
 	for _, entry in pairs(entries_by_index) do
-		if type(entry) == "table" and type(entry.bytes) == "string" and #entry.bytes == ITEM_TYPE_SIZE then
+		if type(entry) == "table" and type(entry.bytes) == "string" and #entry.bytes == ITEM_TYPE_SIZE
+			and has_active_item_assets(state, entry.index) then
 			item_type_entries[#item_type_entries + 1] = entry
 		end
 	end
@@ -347,6 +387,98 @@ end
 
 local function normalize_custom_index(index)
 	return normalize_index(index, FIRST_CUSTOM_INDEX, MAX_ITEM_TYPE_INDEX)
+end
+
+local function require_native_float(value, allow_zero, field)
+	assert(type(value) == "number" and value <= MAX_NATIVE_FLOAT
+		and (value >= MIN_NATIVE_FLOAT or (allow_zero and value == 0)),
+		"itemTypes.new: " .. field .. " must fit a finite native float without underflow")
+end
+
+local function new_item_type(state, src, name, fields)
+	assert(type(name) == "string" and name ~= "" and #name < 64 and not name:find("\0", 1, true),
+		"itemTypes.new: name must contain 1-63 bytes without NUL")
+	assert(fields == nil or type(fields) == "table", "itemTypes.new: fields must be a table")
+	fields = fields or {}
+	local mass = fields.mass == nil and 0.1 or fields.mass
+	require_native_float(mass, false, "mass")
+	assert(fields.name == nil, "itemTypes.new: pass the name as the first argument")
+	assert(fields.isOneHanded == nil or type(fields.isOneHanded) == "boolean",
+		"itemTypes.new: isOneHanded must be boolean")
+	local num_hands = fields.numHands == nil and 1 or fields.numHands
+	assert(type(num_hands) == "number" and num_hands % 1 == 0 and num_hands >= 0 and num_hands <= 2,
+		"itemTypes.new: numHands must be an integer in 0..2")
+	assert(has_memory_write_api() and type(memory.writeFloat) == "function"
+		and type(memory.writeInt) == "function", "itemTypes.new: memory write API unavailable")
+	local grip_source = assert(get_item_type_by_index(25), "itemTypes.new: stock grip reference unavailable")
+	local grip_address, grip_error = get_item_type_address(grip_source)
+	assert(grip_address, "itemTypes.new: " .. tostring(grip_error))
+	-- Stock handheld objects use a calibrated quarter-turn, not an identity grip.
+	local grip = memory.readBytes(grip_address + 0xB0, 16)
+	assert(type(grip) == "string" and #grip == 16, "itemTypes.new: failed to read native grip calibration")
+
+	-- SetupItemTypes (server 0x75480..0x75525) initializes both box bounds and reciprocal inertia.
+	-- Native ITM/IT3 loaders do not perform this part of catalog setup.
+	local bounds = fields.boundsCenter
+	if bounds == nil then bounds = grip_source.boundsCenter end
+	assert(type(bounds) == "table" or type(bounds) == "userdata",
+		"itemTypes.new: boundsCenter must be a Vector")
+	local x, y, z = bounds.x, bounds.y, bounds.z
+	assert(x ~= nil and y ~= nil and z ~= nil, "itemTypes.new: boundsCenter requires x, y and z")
+	for _, component in ipairs({ x, y, z, }) do
+		require_native_float(component, true, "boundsCenter")
+	end
+	local inertia_x, inertia_y, inertia_z = 1, 1, 1
+	if x > 0 and y > 0 and z > 0 then
+		inertia_x = 3 / (y * y + z * z)
+		inertia_y = 3 / (z * z + x * x)
+		inertia_z = 3 / (x * x + y * y)
+	end
+	for _, inertia in ipairs({ inertia_x, inertia_y, inertia_z, }) do
+		require_native_float(inertia, false, "rotational inertia")
+	end
+
+	local index, allocation_error = allocate_next_custom_index(state)
+	assert(index ~= nil, "itemTypes.new: " .. tostring(allocation_error))
+	local address = memory.getBaseAddress() + 0x5A60D7C0 + index * ITEM_TYPE_SIZE
+	-- RosaServer resolves custom slots only after their mass marks them valid.
+	memory.writeBytes(address, string.rep("\0", ITEM_TYPE_SIZE))
+	memory.writeFloat(address + 0x08, mass)
+	memory.writeInt(address + 0x0C, 1)
+	memory.writeInt(address + 0x14, fields.isOneHanded == false and 0 or 1)
+	memory.writeInt(address + 0x7C, num_hands)
+	memory.writeBytes(address + 0xB0, grip)
+	memory.writeBytes(address + 0xC0, grip)
+	memory.writeFloat(address + 0x104, x)
+	memory.writeFloat(address + 0x108, y)
+	memory.writeFloat(address + 0x10C, z)
+	memory.writeFloat(address + 0x110, inertia_x)
+	memory.writeFloat(address + 0x114, inertia_y)
+	memory.writeFloat(address + 0x118, inertia_z)
+	-- Slot 2 is the gun holster; ordinary objects can be stowed in slots 3..6.
+	for slot = 1, 4 do
+		memory.writeInt(address + 0x5DC + slot * 4, 1)
+	end
+	local target_type = get_item_type_by_index(index)
+	assert(target_type ~= nil, "itemTypes.new: failed to resolve allocated item type")
+	target_type.name = name
+	for key, value in pairs(fields) do
+		if key == "mass" or key == "numHands" or key == "isOneHanded" or key == "boundsCenter" then
+			-- These native definition fields were written above, as in vehicleTypes.new.
+		elseif key == "canMountTo" then
+			apply_can_mount_to_overrides(target_type, value)
+		elseif value_looks_like_vector(value)
+			or (type(value) == "userdata" and safe_read(value, "class") == "Vector") then
+			local vector = target_type[key]
+			assert(vector ~= nil, "itemTypes.new: unknown vector field " .. tostring(key))
+			vector.x, vector.y, vector.z = value.x, value.y, value.z
+		else
+			target_type[key] = value
+		end
+	end
+	assert(snapshot_custom_item_type(state, target_type, index), "itemTypes.new: failed to snapshot definition")
+	broadcast_custom_item_types(state, src)
+	return target_type
 end
 
 local function clone_item_type(state, src, source_ref, target_index, overrides)
@@ -489,7 +621,9 @@ local function normalize_item_type_file(state, path, extension, label)
 	assert(not trimmed:find("\\", 1, true), "src.setItemType" .. label .. ": use forward slash paths")
 	assert(string.lower(trimmed):match("%" .. extension .. "$"), "src.setItemType" .. label .. ": path must end with " .. extension)
 
-	local candidates = {
+	-- Scoped owners keep the logical client path separate from the server file.
+	local asset = state.asset_files_by_path and state.asset_files_by_path[trimmed]
+	local candidates = asset and { asset.source_path, } or {
 		trimmed,
 		sync_paths.join(sync_paths.assets_root(state.config), trimmed),
 		sync_paths.join(state.config.clientRoot, trimmed),
@@ -550,6 +684,9 @@ function M.install(state, src, force)
 	state.item_type_texture_assignments = state.item_type_texture_assignments or {}
 	state.item_type_fire_sound_assignments = state.item_type_fire_sound_assignments or {}
 
+	itemTypes.new = function(name, fields)
+		return new_item_type(state, src, name, fields)
+	end
 	itemTypes.clone = function(source_ref, target_index_or_overrides, overrides)
 		return clone_item_type(state, src, source_ref, target_index_or_overrides, overrides)
 	end
