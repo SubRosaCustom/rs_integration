@@ -11,6 +11,10 @@ local world_mutations = require("main.src.world_mutations")
 
 local M = {}
 local HEARTBEAT_TIMEOUT_SECONDS = 60
+-- Match the client encoder's limit, including the terminating newline.
+local MAX_TCP_FRAME_BYTES = 8 * 1024 * 1024
+local MAX_PENDING_SYNC_REQUESTS = 32
+local MAX_PARTIAL_BUNDLE_PATHS = 4096
 local SERVER_EVENT_ID_MIN = 0x80000000
 local SERVER_EVENT_ID_MAX = 0xFFFFFFFF
 local MAX_EVENT_LOG_DETAIL_BYTES = 512
@@ -572,6 +576,11 @@ local function queue_sync_file(state, connection, relative_path)
 		end
 	end
 
+	if #client.pending_file_requests >= MAX_PENDING_SYNC_REQUESTS then
+		log.warn("Too many pending file requests (%s)", client_id(connection))
+		connection:close()
+		return
+	end
 	table.insert(client.pending_file_requests, relative_path)
 end
 
@@ -583,6 +592,11 @@ local function queue_sync_bundle(state, connection, bundle_id, paths)
 
 	local bundle = state.sync_bundles_by_id and state.sync_bundles_by_id[bundle_id] or nil
 	if type(paths) == "table" then
+		if #paths == 0 or #paths > MAX_PARTIAL_BUNDLE_PATHS then
+			log.warn("Invalid partial bundle path count (%s)", client_id(connection))
+			connection:close()
+			return
+		end
 		-- The worker validates the request against its immutable snapshot and builds the ZIP.
 		bundle = { id = bundle_id, kind = "partial", paths = paths, }
 	elseif not bundle then
@@ -602,6 +616,11 @@ local function queue_sync_bundle(state, connection, bundle_id, paths)
 		end
 	end
 
+	if #client.pending_bundle_requests >= MAX_PENDING_SYNC_REQUESTS then
+		log.warn("Too many pending bundle requests (%s)", client_id(connection))
+		connection:close()
+		return
+	end
 	table.insert(client.pending_bundle_requests, bundle)
 end
 
@@ -1606,6 +1625,15 @@ local function process_buffered_frames(state, connection, client, frame_budget)
 	while processed < frame_budget do
 		local newline_position = client.receive_buffer:find("\n", 1, true)
 		if not newline_position then
+			if #client.receive_buffer >= MAX_TCP_FRAME_BYTES then
+				log.warn("TCP frame exceeds limit (%s)", client_id(connection))
+				connection:close()
+			end
+			break
+		end
+		if newline_position > MAX_TCP_FRAME_BYTES then
+			log.warn("TCP frame exceeds limit (%s)", client_id(connection))
+			connection:close()
 			break
 		end
 
@@ -1657,6 +1685,13 @@ local function process_client_reads(state, connection)
 		end
 		read_bytes_this_tick = read_bytes_this_tick + #data
 
+		local newline_position = data:find("\n", 1, true)
+		local first_frame_bytes = newline_position or (#data + 1)
+		if #client.receive_buffer + first_frame_bytes > MAX_TCP_FRAME_BYTES then
+			log.warn("TCP frame exceeds limit (%s)", client_id(connection))
+			connection:close()
+			break
+		end
 		client.receive_buffer = client.receive_buffer .. data
 		frames_this_tick = frames_this_tick + process_buffered_frames(
 			state,

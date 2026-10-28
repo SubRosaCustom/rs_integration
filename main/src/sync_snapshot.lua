@@ -3,6 +3,24 @@ local client_scope = require("main.src.client_scope")
 local has_miniz_integration = pcall(require, "libminiz")
 
 local M = {}
+local MAX_SNAPSHOT_FILES = 4096
+local MAX_SNAPSHOT_BYTES = 256 * 1024 * 1024
+local MAX_SCRIPT_BYTES = 2 * 1024 * 1024
+local MAX_ASSET_BYTES = 128 * 1024 * 1024
+local MAX_SYNC_PATH_BYTES = 1024
+
+local function read_snapshot_file(state, path, sync_path, limit)
+	assert(#sync_path <= MAX_SYNC_PATH_BYTES, "Sync path exceeds size limit: " .. sync_path)
+	assert(state.snapshot_file_count < MAX_SNAPSHOT_FILES, "Sync snapshot exceeds file count limit")
+	local remaining = MAX_SNAPSHOT_BYTES - state.snapshot_bytes
+	local bytes = sync_paths.read_file(path, math.min(limit, remaining))
+	if bytes then
+		assert(#bytes <= limit and #bytes <= remaining, "Sync snapshot exceeds byte limit: " .. sync_path)
+		state.snapshot_file_count = state.snapshot_file_count + 1
+		state.snapshot_bytes = state.snapshot_bytes + #bytes
+	end
+	return bytes
+end
 
 local function to_lower(value)
 	if type(value) ~= "string" then
@@ -273,7 +291,7 @@ local function collect_scripts_recursive(state, bundle, root, relative_path)
 
 			if sync_paths.is_safe_script(relative_pathname) then
 				local full_path = sync_paths.join(root, relative_pathname)
-				local bytes = sync_paths.read_file(full_path)
+				local bytes = read_snapshot_file(state, full_path, relative_pathname, MAX_SCRIPT_BYTES)
 				if bytes then
 					append_snapshot_record(state, bundle, {
 						path = relative_pathname,
@@ -373,7 +391,7 @@ local function collect_asset_files_recursive(state, bundle, root, sync_root_pref
 			if sync_paths.is_safe_asset(sync_path) then
 				local should_skip = should_skip_bundled_model_cmo(sync_path)
 				if not should_skip then
-					local bytes = assert(sync_paths.read_file(full_path), "Cannot read asset: " .. full_path)
+					local bytes = assert(read_snapshot_file(state, full_path, sync_path, MAX_ASSET_BYTES), "Cannot read asset: " .. full_path)
 					if bytes then
 						if should_skip_bundled_vehicle_sbv(sync_path, bytes) then
 							goto continue
@@ -411,7 +429,7 @@ local function collect_top_level_vehicle_sbv_files(state, bundle, root, sync_roo
 
 			if sync_paths.extension(sync_path) == ".sbv" and sync_paths.is_safe_asset(sync_path) then
 				local full_path = sync_paths.join(root, relative_path)
-				local bytes = sync_paths.read_file(full_path)
+				local bytes = read_snapshot_file(state, full_path, sync_path, MAX_ASSET_BYTES)
 				if bytes then
 					if should_skip_bundled_vehicle_sbv(sync_path, bytes) then
 						goto continue
@@ -433,6 +451,8 @@ end
 
 local function build_snapshot(state)
 	reset_sync_snapshot(state)
+	state.snapshot_file_count = 0
+	state.snapshot_bytes = 0
 	local normalized_level = M.normalize_loaded_level(server and server.loadedLevel or nil)
 	state.loaded_level = normalized_level
 

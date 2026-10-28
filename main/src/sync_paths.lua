@@ -94,15 +94,35 @@ function M.is_contained(root, path)
 	return base ~= nil and resolved ~= nil and resolved == base .. "/" .. relative
 end
 
-function M.read_file(path)
+function M.read_file(path, max_bytes)
 	local file = io.open(path, "rb")
 	if not file then
 		return nil
 	end
 
-	local contents = file:read("*all")
+	if not max_bytes then
+		local contents, read_error = file:read("*all")
+		file:close()
+		assert(not read_error, "Cannot read sync file: " .. path .. ": " .. tostring(read_error))
+		return contents
+	end
+	local chunks, total = {}, 0
+	while true do
+		local bytes, read_error = file:read(math.min(65536, max_bytes - total + 1))
+		if read_error then
+			file:close()
+			error("Cannot read sync file: " .. path .. ": " .. tostring(read_error))
+		end
+		if not bytes or bytes == "" then break end
+		total = total + #bytes
+		if total > max_bytes then
+			file:close()
+			error("Sync file exceeds size limit: " .. path)
+		end
+		chunks[#chunks + 1] = bytes
+	end
 	file:close()
-	return contents
+	return table.concat(chunks)
 end
 
 function M.extension(name)
