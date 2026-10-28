@@ -30,6 +30,12 @@ refresh, retaining the previous complete snapshot. Malformed disable lists and f
 reject the update. Owner paths cannot escape their roots through symlinks.
 Canonical containment uses LuaJIT's FFI and libc `realpath` on RosaServer/Linux.
 
+Snapshot construction accepts at most 4,096 files and 256 MiB of source data
+across all bundles. Individual scripts are limited to 2 MiB, assets to 128 MiB,
+and logical paths to 1,024 bytes. These limits include files read during
+deduplication. A limit violation rejects the candidate and retains the previous
+published snapshot; reduce the selected content before retrying.
+
 Enable/disable commands refresh immediately. Entry-point/disable-list membership
 is checked every 60 server ticks even when optional content watching is disabled.
 With `autoRefreshEnabled`, file creation, deletion, rename, and modification trigger

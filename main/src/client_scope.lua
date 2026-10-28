@@ -2,6 +2,7 @@
 local paths = require("main.src.sync_paths")
 local json = require("main.json")
 local M = {}
+local MAX_SCRIPT_BYTES = 2 * 1024 * 1024
 
 function M.valid_owner(name)
 	return type(name) == "string" and name:match("^[A-Za-z0-9_-]+$") ~= nil
@@ -20,7 +21,7 @@ function M.read_disabled(config)
 	end
 	if not present then return {} end
 	assert(paths.is_contained(root, path), "Unsafe disabledPlugins.json path")
-	local source = assert(paths.read_file(path), "Cannot read disabledPlugins.json")
+	local source = assert(paths.read_file(path, MAX_SCRIPT_BYTES), "Cannot read disabledPlugins.json")
 	assert(source:match("^%s*%["), "Invalid disabledPlugins.json: expected array")
 	local ok, decoded = pcall(json.decode, source)
 	assert(ok and type(decoded) == "table", "Invalid disabledPlugins.json")
@@ -47,7 +48,7 @@ function M.names(config, namespace)
 			local path = paths.join(root, entry.name)
 			if entry.isDirectory then path = paths.join(path, "init.lua") end
 			if paths.is_contained(root, path) then
-				assert(paths.read_file(path) ~= nil, "Cannot read client entry: " .. path)
+				assert(paths.read_file(path, MAX_SCRIPT_BYTES) ~= nil, "Cannot read client entry: " .. path)
 				found[name] = true
 			end
 		end

@@ -33,7 +33,14 @@ io.open = function(path, mode)
 	if mode ~= 'rb' then return real_open(path, mode) end
 	local bytes = files[path]
 	if not bytes then return nil end
-	return { read = function() return bytes end, close = function() end }
+	local offset = 1
+	return { read = function(_, size)
+		if size == '*all' then return bytes:sub(offset) end
+		if offset > #bytes then return nil end
+		local chunk = bytes:sub(offset, offset + size - 1)
+		offset = offset + #chunk
+		return chunk
+	end, close = function() end }
 end
 os.listDirectory = function(root)
 	local entries, seen = {}, {}
@@ -348,6 +355,12 @@ assert(not pcall(snapshot.discover, state))
 assert(state.asset_files == stable_files and state.manifest_hash == stable_hash)
 paths.read_file = read_before
 print('snapshot configuration consistency and I/O rollback checks passed')
+
+add('clientroot/scripts/plugins/oversized.lua', string.rep('x', 2 * 1024 * 1024 + 1))
+assert(not pcall(snapshot.discover, state))
+assert(state.asset_files == stable_files and state.manifest_hash == stable_hash)
+files['clientroot/scripts/plugins/oversized.lua'] = nil
+print('oversized snapshot is rejected without replacing the published snapshot')
 
 add('clientroot/assets/plugins/zeta/data/model/ZETA.cmo', 'zeta')
 assert(not pcall(snapshot.discover, state))

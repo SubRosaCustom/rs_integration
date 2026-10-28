@@ -314,14 +314,23 @@ function M.decode(blob)
 		elseif value_type == TYPE_TRUE then
 			values[index] = true
 		elseif value_type == TYPE_INTEGER then
+			if #blob - pos + 1 < 8 then
+				return nil, "truncated integer"
+			end
 			local value
 			value, pos = string.unpack(">i8", blob, pos)
 			values[index] = value
 		elseif value_type == TYPE_NUMBER then
+			if #blob - pos + 1 < 8 then
+				return nil, "truncated number"
+			end
 			local value
 			value, pos = string.unpack(">d", blob, pos)
 			values[index] = value
 		elseif value_type == TYPE_STRING or value_type == TYPE_BINARY then
+			if #blob - pos + 1 < 4 then
+				return nil, "truncated string length"
+			end
 			local len
 			len, pos = string.unpack(">I4", blob, pos)
 			if len < 0 or pos + len - 1 > #blob then
