@@ -169,7 +169,8 @@ function src.setVehicleTypeModel(indexOrType, modelName, player) end
 function src.setVehicleTypeAudio(indexOrType, audioRef, player) end
 
 ---Register a custom human model (CMC pair) at a model index and sync it to
----all SRC clients.
+---all SRC clients. Clients hold at most 6 custom human models at once; slots are
+---handed out in ascending index order, so models beyond the 6th lowest index do not load.
 ---@param index integer The custom model index, between 0 and 29.
 ---@param def SrcHumanModelDef The male/female CMC names, ex. { male = "model_m", female = "model_f" }.
 ---@return integer index The normalized model index.
