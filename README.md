@@ -65,12 +65,15 @@ Common settings include:
 - `enabled`
 - `clientRoot`
 - `disallowNonSRCPlayers`
+- `disableClientTiremarks` (boolean, defaults to `false`; `true` disables SRC tiremarks for connected clients, overriding their local preference)
 - `motd` (up to 160 bytes, rendered with the base game's single-byte font atlas when an SRC server is hovered)
 - `motdIcon` (path to an exact 32x32 PNG smaller than 5 KiB; relative paths use the server's working directory)
 - file transfer limits
 - queue limits
 - auto-refresh settings
 - event retry/timeout settings
+
+For example, set `config.src.disableClientTiremarks = true` in the server Lua config. The setting is sent in `HELLO_ACK`, `INDEX_RES`, and `REFRESH_NOTICE`. Reload the server configuration and use the normal sync refresh flow to apply changes to connected clients. Clearing it restores each client's local preference; it does not force tiremarks on. The restriction survives a temporary sync reconnect and is cleared when the server session ends. Updated clients treat an absent field as `false`; older clients ignore the field and cannot enforce it. No protocol version bump is required for this optional field.
 
 `clientRoot` is the server-side directory tree that gets indexed and synced to SRC clients.
 

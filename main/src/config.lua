@@ -48,6 +48,7 @@ end
 M.DEFAULTS = {
 	enabled = true,
 	disallowNonSRCPlayers = false,
+	disableClientTiremarks = false,
 	disallowedPaths = {},
 	clientRoot = "subrosacustom",
 	motd = "",
@@ -101,6 +102,10 @@ function M.resolve(raw)
 
 	if type(raw.disallowNonSRCPlayers) == "boolean" then
 		resolved.disallowNonSRCPlayers = raw.disallowNonSRCPlayers
+	end
+
+	if type(raw.disableClientTiremarks) == "boolean" then
+		resolved.disableClientTiremarks = raw.disableClientTiremarks
 	end
 
 	if raw.disallowedPaths ~= nil then
