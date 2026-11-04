@@ -170,7 +170,7 @@ package.loaded["main.src.udp_events"] = {
 local network = require("main.src.network")
 local clients = {}
 local state = { clients = clients, sync_generation = 3, runtime_id = "runtime",
-	manifest_hash = "new scope", config = { disallowedPaths = {} }, }
+	manifest_hash = "new scope", config = { disallowedPaths = {}, disableClientTiremarks = true }, }
 local function add_client(hello, bound, open, valid)
 	local connection = { is_open = open, address = "127.0.0.1" }
 	function connection:discard_pending_sends(tail) self.discarded = true; self.tail = tail end
@@ -200,6 +200,7 @@ for _, connection in ipairs({ pending, bound }) do
 	assert(client.send_offset == 1 and #client.send_queue == 1)
 	local message = json.decode(client.send_queue[1])
 	assert(message.type == "REFRESH_NOTICE" and message.payload.syncGeneration == 4)
+	assert(message.payload.disableClientTiremarks == true)
 	assert(message.payload.manifestHash == "new scope" and message.payload.pluginReload == "disabled-plugin")
 	assert(client.sync_state == "capable" and client.generation == 4)
 	assert(client.ready_generation == 0 and not client.ready_manifest_hash and not client.udp_events_ready)
@@ -208,4 +209,12 @@ end
 assert(not raw.discarded and #raw_client.send_queue == 2)
 assert(not closed.discarded and not invalid.is_open)
 assert(require("main.src.protocol").VERSION == 10)
-print("refresh cancellation and TCP frame preservation checks passed")
+
+state.config.disableClientTiremarks = false
+network.refresh(state)
+for _, connection in ipairs({ pending, bound }) do
+	local message = json.decode(clients[connection].send_queue[1])
+	assert(message.payload.disableClientTiremarks == false)
+end
+
+print("refresh cancellation, TCP frame preservation, and tiremark policy checks passed")

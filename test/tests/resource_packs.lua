@@ -12,4 +12,12 @@ end
 assert(not pcall(config.resolve, { disallowedPaths = { [1] = "data/a", [3] = "data/b" } }))
 assert(not pcall(config.resolve, { disallowedPaths = { key = "data/a" } }))
 assert(require("main.src.protocol").VERSION == 10)
-print("resource pack policy contract passed")
+
+assert(config.resolve(nil).disableClientTiremarks == false)
+assert(config.resolve({}).disableClientTiremarks == false)
+assert(config.resolve({ disableClientTiremarks = true }).disableClientTiremarks == true)
+assert(config.resolve({ disableClientTiremarks = false }).disableClientTiremarks == false)
+assert(config.resolve({ disableClientTiremarks = "true" }).disableClientTiremarks == false)
+assert(config.DEFAULTS.disableClientTiremarks == false)
+
+print("resource pack and tiremark policy config checks passed")
