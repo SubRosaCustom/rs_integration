@@ -1,4 +1,4 @@
--- Version: 0.9.7
+-- Version: 0.9.9
 ---@diagnostic disable: lowercase-global
 pcall(require, "librosaserver_src_integration")
 
