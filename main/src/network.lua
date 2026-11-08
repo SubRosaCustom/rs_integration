@@ -244,7 +244,7 @@ local function get_player_connection(state, player)
 	return nil
 end
 
-local function resolve_client_player_from_hello(_, connection, payload)
+local function resolve_client_player_from_hello(state, connection, payload)
 	if not connection then
 		return nil, "missing_connection"
 	end
@@ -260,10 +260,17 @@ local function resolve_client_player_from_hello(_, connection, payload)
 	end
 
 	local best_player = nil
+	local client = state.clients[connection]
+	if not client or not client.game_address or not client.game_port
+		or tostring(client.game_address) ~= tostring(connection.address) then
+		return nil, "missing_game_endpoint"
+	end
 	local remote_address = tostring(connection.address)
 
 	for _, player in ipairs(players.getNonBots()) do
-		if not player.isBot and player.connection and tostring(player.connection.address) == remote_address then
+		if not player.isBot and player.account and player.connection
+			and tostring(player.connection.address) == remote_address
+			and tonumber(player.connection.port) == tonumber(client.game_port) then
 			if phone_number and tonumber(player.phoneNumber) ~= phone_number then
 				goto continue
 			end
@@ -322,6 +329,7 @@ local function reset_client_sync_state(connection, client, preserve_udp_state)
 	close_client_transfer(client)
 	client.pending_file_requests = {}
 	client.pending_bundle_requests = {}
+	client.pending_index_request = false
 	client.send_queue = {}
 	client.send_offset = 1
 	client.sync_state = client.hello and "capable" or "connected"
@@ -353,8 +361,10 @@ local function validate_bound_player(connection, client)
 
 	local player = client.player
 	local player_connection = player.connection
-	local invalid = player.isBot or not player_connection
+	local invalid = player.isBot or not player.account or not player_connection
 		or tostring(player_connection and player_connection.address) ~= tostring(connection.address)
+		or tostring(client.game_address) ~= tostring(connection.address)
+		or tonumber(player_connection and player_connection.port) ~= tonumber(client.game_port)
 	if client.hello_payload then
 		local phone_number = parse_positive_integer(client.hello_payload.phoneNumber or client.hello_payload.phone)
 		local sub_rosa_id =
@@ -1515,8 +1525,13 @@ local function handle_index_request(state, connection)
 		return
 	end
 
-	-- INDEX_RES terminates the runtime snapshot, including before the game player is bound.
-	-- Refresh must replace the previous snapshot even when the new type lists are empty.
+	if not refresh_client_player_binding(state, connection, client) then
+		client.pending_index_request = true
+		return
+	end
+	client.pending_index_request = false
+
+	-- INDEX_RES terminates the complete runtime snapshot.
 	send_initial_custom_item_sync(state, connection)
 	send_initial_custom_vehicle_sync(state, connection)
 	enqueue_frame(state, connection, "INDEX_RES", {
@@ -1533,13 +1548,15 @@ local function handle_index_request(state, connection)
 end
 
 local function handle_file_request(state, connection, payload)
-	if require_hello(state, connection, "FILE_REQ") then
+	local client = require_hello(state, connection, "FILE_REQ")
+	if client and refresh_client_player_binding(state, connection, client) then
 		queue_sync_file(state, connection, payload.path)
 	end
 end
 
 local function handle_bundle_request(state, connection, payload)
-	if require_hello(state, connection, "BUNDLE_REQ") then
+	local client = require_hello(state, connection, "BUNDLE_REQ")
+	if client and refresh_client_player_binding(state, connection, client) then
 		queue_sync_bundle(state, connection, payload.id, payload.paths)
 	end
 end
@@ -1813,6 +1830,10 @@ local function process_clients(state)
 						send_initial_custom_vehicle_sync(state, connection)
 					end
 				end
+			end
+
+			if client.pending_index_request and client.bound then
+				handle_index_request(state, connection)
 			end
 
 			suppress_player_timeout_while_syncing(client)
@@ -2342,8 +2363,7 @@ end
 function M.refresh(state, plugin_name)
 	local generation = next_sync_generation(state)
 	for connection, client in pairs(state.clients) do
-		-- HELLO clients can download before a game player is bound. They must
-		-- cancel the old snapshot too when a mode or plugin leaves the scope.
+		-- Pending clients must also cancel an old snapshot when scope changes.
 		if connection.is_open and client.hello
 			and (not client.bound or validate_bound_player(connection, client)) then
 			reset_client_sync_state(connection, client, true)

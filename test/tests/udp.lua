@@ -54,6 +54,8 @@ return function(state, src)
 		hello = true,
 		hello_payload = nil,
 		bound = true,
+		game_address = "127.0.0.1",
+		game_port = 27071,
 		udp_events_ready = true,
 		udp_token = token,
 		udp_send_queue = {},
@@ -63,6 +65,7 @@ return function(state, src)
 		last_heartbeat_at = os.realClock(),
 		sync_state = "ready",
 		player = {
+			account = {},
 			isBot = false,
 			connection = {
 				address = "127.0.0.1",

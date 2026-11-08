@@ -181,8 +181,12 @@ local function add_client(hello, bound, open, valid)
 			close = function() connection.file_closed = true end,
 		} }, udp_events_ready = true, ready_generation = 3,
 		ready_manifest_hash = "old scope", pending_events = { "keep" }, }
-	if bound then client.player = { isBot = false,
-		connection = { address = valid and "127.0.0.1" or "other" }, } end
+	if bound then
+		client.game_address = "127.0.0.1"
+		client.game_port = 27071
+		client.player = { isBot = false, account = {},
+			connection = { address = valid and "127.0.0.1" or "other", port = 27071 }, }
+	end
 	clients[connection] = client
 	return connection, client
 end

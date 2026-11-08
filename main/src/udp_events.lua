@@ -264,7 +264,7 @@ local function find_client_for_datagram(state, token, address)
 	for connection, client in pairs(state.clients) do
 		if client
 			and client.udp_token == token
-			-- and tostring(connection.address) == tostring(address)
+			and tostring(connection.address) == tostring(address)
 		then
 			return connection, client
 		end
@@ -321,6 +321,10 @@ function M.on_packet_receive(state)
 			local port = normalize_port(packet.port)
 			local connection, client = find_client_for_datagram(state, token, address)
 			if not client or not port or not connection.is_open or not client.hello then
+				break
+			end
+			if client.bound and (tostring(client.game_address) ~= address
+				or tonumber(client.game_port) ~= port) then
 				break
 			end
 			client.game_address = address

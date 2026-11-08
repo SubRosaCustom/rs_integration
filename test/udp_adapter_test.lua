@@ -21,9 +21,10 @@ local codec = require("main.src.event_codec")
 local udp = require("main.src.udp_events")
 local reliable = require("main.src.reliable_udp")
 local token = string.rep("a", 32)
-local connection = { is_open = true, close = function(self) self.is_open = false end, }
+local connection = { address = "127.0.0.1", is_open = true, close = function(self) self.is_open = false end, }
 local client = {
 	udp_token = token, hello = true, bound = true, udp_events_ready = true,
+	game_address = "127.0.0.1", game_port = 27071,
 	player = { connection = { address = "127.0.0.1", port = 27071, }, },
 }
 local state = { clients = { [connection] = client, }, config = { maxEventBytes = 262144, }, }
@@ -39,6 +40,13 @@ local delivered, result_delivered = 0, 0
 local function wrap(packet)
 	return string.pack(">c4c4BBc32I2", "7DFP", "SRCU", 2, 0, token, #packet) .. packet
 end
+local empty_binding = wrap(string.pack(">BBI2", 1, 0, 0))
+inbound = {{address = "127.0.0.2", port = 27071, data = empty_binding}}
+udp.on_packet_receive(state)
+assert(client.game_address == "127.0.0.1" and #outbound == 0, "reject a different TCP address")
+inbound = {{address = "127.0.0.1", port = 27072, data = empty_binding}}
+udp.on_packet_receive(state)
+assert(client.game_port == 27071 and #outbound == 0, "reject a changed bound game endpoint")
 for tick = 0, 12000 do
 	time = tick * 0.01
 	reliable.advance(remote, time, true)
