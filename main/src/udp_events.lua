@@ -52,7 +52,7 @@ end
 
 -- bytes this client may still buffer: its share of the global budget, not below the floor
 local function client_available_bytes(peer)
-	local share = math.max(MIN_CLIENT_BUFFERED_BYTES, MAX_GLOBAL_BUFFERED_BYTES // math.max(1, peer_count))
+	local share = math.max(MIN_CLIENT_BUFFERED_BYTES, math.floor(MAX_GLOBAL_BUFFERED_BYTES / math.max(1, peer_count)))
 	local global_room = MAX_GLOBAL_BUFFERED_BYTES - reliable_udp.total_bytes()
 	local floor_room = MIN_CLIENT_BUFFERED_BYTES - peer.bytes
 	return math.max(0, math.min(share - peer.bytes, math.max(global_room, floor_room)))

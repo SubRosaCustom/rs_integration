@@ -171,6 +171,32 @@ local function handle_client_event(state, connection, message)
 	}
 end
 
+-- names the events filling a client's reliable queue, so an overflow points at the sender
+local function describe_backlog(client)
+	local counts, names, total = {}, {}, 0
+	for _, pending in pairs(client.pending_events) do
+		if not counts[pending.name] then
+			names[#names + 1] = pending.name
+			counts[pending.name] = 0
+		end
+		counts[pending.name] = counts[pending.name] + 1
+		total = total + 1
+	end
+	table.sort(names, function(a, b)
+		return counts[a] > counts[b]
+	end)
+	local parts = {}
+	for index = 1, math.min(#names, 5) do
+		parts[index] = string.format("%s x%d", names[index], counts[names[index]])
+	end
+	return string.format(
+		"%d unacknowledged events [%s]; the client is not acknowledging fast enough, so send less often"
+			.. " or use src.emitClientEventLatest for replaceable state",
+		total,
+		table.concat(parts, ", ")
+	)
+end
+
 local function queue_reliable_udp_event(state, connection, name, event_hash, argument_bytes, latest)
 	local client = state.clients[connection]
 	if not client or not connection.is_open or not client.hello or not client.bound then
@@ -236,7 +262,11 @@ local function queue_reliable_udp_event(state, connection, name, event_hash, arg
 	end
 
 	if not udp_events.enqueue(client, bytes) then
-		udp_events.warn_limited(client, "event_budget", "UDP event queue budget exhausted (%s) client=%s", name, client_id(connection))
+		udp_events.warn_limited(client, "event_budget", "UDP event queue budget exhausted (%s) client=%s: %s",
+			name,
+			client_id(connection),
+			describe_backlog(client)
+		)
 		return false
 	end
 
@@ -291,7 +321,11 @@ local function queue_reliable_udp_result(state, connection, name, message_id, ev
 	end
 
 	if not udp_events.enqueue(client, bytes) then
-		udp_events.warn_limited(client, "result_budget", "UDP result queue budget exhausted (%s) client=%s", name, client_id(connection))
+		udp_events.warn_limited(client, "result_budget", "UDP result queue budget exhausted (%s) client=%s: %s",
+			name,
+			client_id(connection),
+			describe_backlog(client)
+		)
 		return false
 	end
 
@@ -529,7 +563,7 @@ function network_events.on_udp_datagram(state, decoded)
 						result_payload
 					) then
 						log.warn(
-							"failed to queue result for client event (%s) id=%s client=%s",
+							"failed to queue result for client event (%s) id=%s client=%s; disconnecting the client",
 							result.event_name or udp_events.format_event_hash(message.event_hash),
 							message.message_id,
 							client_id(connection)

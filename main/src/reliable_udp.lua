@@ -64,7 +64,7 @@ end
 local function order_search(order, transfer_key)
 	local low, high = 1, #order
 	while low <= high do
-		local middle = (low + high) // 2
+		local middle = math.floor((low + high) / 2)
 		if order[middle] < transfer_key then
 			low = middle + 1
 		else
@@ -512,7 +512,7 @@ function reliable_udp.receive(peer, packet, available_bytes)
 	if not piece.acked then
 		piece.acked = true
 		transfer.received = transfer.received + 1
-		local byte = index // 8 + 1
+		local byte = math.floor(index / 8) + 1
 		transfer.bits[byte] = transfer.bits[byte] + 2 ^ (index % 8)
 		transfer.bit_chars[byte] = string.char(transfer.bits[byte])
 	end

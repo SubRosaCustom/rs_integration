@@ -161,7 +161,7 @@ function src.setItemTypeFireSounds(indexOrType, soundPaths, player) end
 function src.syncCustomVehicleTypes(player) end
 
 ---Assign a client-side model to a vehicle type and sync it.
----@param indexOrType integer|VehicleType The vehicle type to assign to (0-127).
+---@param indexOrType integer|VehicleType A stock (0-16) or custom (17-127) vehicle type. Stock overrides are client-visual and restored when the client resets sync.
 ---@param modelName string Bare SBV name, without path or extension. Requires server file data/<name>.sbv.
 ---@param player? Player Limits the immediate send only. Shared assignment state changes for future syncs; nil broadcasts.
 ---@return integer|boolean sent

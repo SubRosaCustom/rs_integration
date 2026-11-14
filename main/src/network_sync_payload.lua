@@ -357,6 +357,8 @@ local function send_initial_custom_vehicle_sync(state, connection)
 	end
 end
 
+-- Live pushes skip clients whose refresh notice is still pending: they still hold the old file
+-- list, and the INDEX_REQ that follows the notice resends the complete current snapshot.
 function network_sync_payload.binary(bytes)
 	return udp_events.binary(bytes)
 end
@@ -370,6 +372,7 @@ function network_sync_payload.sync_client_item_types(state, player, payload)
 		local sent = 0
 		for connection, client in pairs(state.clients) do
 			if connection.is_open and client.hello and client.bound
+				and not client.pending_refresh_notice
 				and validate_bound_player(connection, client) then
 				if queue_item_types_sync_frame(state, connection, payload) then
 					sent = sent + 1
@@ -388,7 +391,7 @@ function network_sync_payload.sync_client_item_types(state, player, payload)
 	end
 
 	local connection = get_player_connection(state, player)
-	if not connection then
+	if not connection or state.clients[connection].pending_refresh_notice then
 		return false
 	end
 
@@ -404,6 +407,7 @@ function network_sync_payload.sync_client_vehicle_types(state, player, payload)
 		local sent = 0
 		for connection, client in pairs(state.clients) do
 			if connection.is_open and client.hello and client.bound
+				and not client.pending_refresh_notice
 				and validate_bound_player(connection, client) then
 				if queue_vehicle_types_sync_frame(state, connection, payload) then
 					sent = sent + 1
@@ -422,7 +426,7 @@ function network_sync_payload.sync_client_vehicle_types(state, player, payload)
 	end
 
 	local connection = get_player_connection(state, player)
-	if not connection then
+	if not connection or state.clients[connection].pending_refresh_notice then
 		return false
 	end
 
@@ -434,6 +438,7 @@ function network_sync_payload.send_item_type_icon(state, player, index, icon_pat
 		local sent = 0
 		for connection, client in pairs(state.clients) do
 			if connection.is_open and client.hello and client.bound
+				and not client.pending_refresh_notice
 				and validate_bound_player(connection, client) then
 				if queue_item_type_icon_frame(state, connection, index, icon_path) then
 					sent = sent + 1
@@ -452,7 +457,7 @@ function network_sync_payload.send_item_type_icon(state, player, index, icon_pat
 	end
 
 	local connection = get_player_connection(state, player)
-	if not connection then
+	if not connection or state.clients[connection].pending_refresh_notice then
 		return false
 	end
 
@@ -464,6 +469,7 @@ function network_sync_payload.send_item_type_texture(state, player, index, textu
 		local sent = 0
 		for connection, client in pairs(state.clients) do
 			if connection.is_open and client.hello and client.bound
+				and not client.pending_refresh_notice
 				and validate_bound_player(connection, client) then
 				if queue_item_type_texture_frame(state, connection, index, texture_assignment) then
 					sent = sent + 1
@@ -482,7 +488,7 @@ function network_sync_payload.send_item_type_texture(state, player, index, textu
 	end
 
 	local connection = get_player_connection(state, player)
-	if not connection then
+	if not connection or state.clients[connection].pending_refresh_notice then
 		return false
 	end
 
@@ -494,6 +500,7 @@ function network_sync_payload.send_item_type_fire_sounds(state, player, index, s
 		local sent = 0
 		for connection, client in pairs(state.clients) do
 			if connection.is_open and client.hello and client.bound
+				and not client.pending_refresh_notice
 				and validate_bound_player(connection, client) then
 				if queue_item_type_fire_sounds_frame(state, connection, index, sound_assignment) then
 					sent = sent + 1
@@ -512,7 +519,7 @@ function network_sync_payload.send_item_type_fire_sounds(state, player, index, s
 	end
 
 	local connection = get_player_connection(state, player)
-	if not connection then
+	if not connection or state.clients[connection].pending_refresh_notice then
 		return false
 	end
 
@@ -524,6 +531,7 @@ function network_sync_payload.send_item_type_itm(state, player, index, itm_path)
 		local sent = 0
 		for connection, client in pairs(state.clients) do
 			if connection.is_open and client.hello and client.bound
+				and not client.pending_refresh_notice
 				and validate_bound_player(connection, client) then
 				if queue_item_type_itm_frame(state, connection, index, itm_path) then
 					sent = sent + 1
@@ -542,7 +550,7 @@ function network_sync_payload.send_item_type_itm(state, player, index, itm_path)
 	end
 
 	local connection = get_player_connection(state, player)
-	if not connection then
+	if not connection or state.clients[connection].pending_refresh_notice then
 		return false
 	end
 
@@ -554,6 +562,7 @@ function network_sync_payload.send_item_type_it3(state, player, index, it3_path)
 		local sent = 0
 		for connection, client in pairs(state.clients) do
 			if connection.is_open and client.hello and client.bound
+				and not client.pending_refresh_notice
 				and validate_bound_player(connection, client) then
 				if queue_item_type_it3_frame(state, connection, index, it3_path) then
 					sent = sent + 1
@@ -572,7 +581,7 @@ function network_sync_payload.send_item_type_it3(state, player, index, it3_path)
 	end
 
 	local connection = get_player_connection(state, player)
-	if not connection then
+	if not connection or state.clients[connection].pending_refresh_notice then
 		return false
 	end
 
@@ -584,6 +593,7 @@ function network_sync_payload.send_human_model(state, player, index, assignment)
 		local sent = 0
 		for connection, client in pairs(state.clients) do
 			if connection.is_open and client.hello and client.bound
+				and not client.pending_refresh_notice
 				and validate_bound_player(connection, client) then
 				if queue_human_model_frame(state, connection, index, assignment) then
 					sent = sent + 1
@@ -602,7 +612,7 @@ function network_sync_payload.send_human_model(state, player, index, assignment)
 	end
 
 	local connection = get_player_connection(state, player)
-	if not connection then
+	if not connection or state.clients[connection].pending_refresh_notice then
 		return false
 	end
 
@@ -642,6 +652,7 @@ function network_sync_payload.send_vehicle_type_model(state, player, index, mode
 		local sent = 0
 		for connection, client in pairs(state.clients) do
 			if connection.is_open and client.hello and client.bound
+				and not client.pending_refresh_notice
 				and validate_bound_player(connection, client) then
 				if queue_vehicle_type_model_frame(state, connection, index, model_name) then
 					sent = sent + 1
@@ -660,7 +671,7 @@ function network_sync_payload.send_vehicle_type_model(state, player, index, mode
 	end
 
 	local connection = get_player_connection(state, player)
-	if not connection then
+	if not connection or state.clients[connection].pending_refresh_notice then
 		return false
 	end
 
@@ -672,6 +683,7 @@ function network_sync_payload.send_vehicle_type_audio(state, player, index, audi
 		local sent = 0
 		for connection, client in pairs(state.clients) do
 			if connection.is_open and client.hello and client.bound
+				and not client.pending_refresh_notice
 				and validate_bound_player(connection, client) then
 				if queue_vehicle_type_audio_frame(state, connection, index, audio_reference) then
 					sent = sent + 1
@@ -690,7 +702,7 @@ function network_sync_payload.send_vehicle_type_audio(state, player, index, audi
 	end
 
 	local connection = get_player_connection(state, player)
-	if not connection then
+	if not connection or state.clients[connection].pending_refresh_notice then
 		return false
 	end
 
@@ -702,6 +714,7 @@ function network_sync_payload.send_item_type_model(state, player, index, model_n
 		local sent = 0
 		for connection, client in pairs(state.clients) do
 			if connection.is_open and client.hello and client.bound
+				and not client.pending_refresh_notice
 				and validate_bound_player(connection, client) then
 				if queue_item_type_model_frame(state, connection, index, model_name) then
 					sent = sent + 1
@@ -720,7 +733,7 @@ function network_sync_payload.send_item_type_model(state, player, index, model_n
 	end
 
 	local connection = get_player_connection(state, player)
-	if not connection then
+	if not connection or state.clients[connection].pending_refresh_notice then
 		return false
 	end
 
