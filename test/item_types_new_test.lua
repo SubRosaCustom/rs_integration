@@ -1,5 +1,8 @@
+hook = { add = function() end, once = function(_, fn) fn() end, run = function() end, }
 -- Run from rs_integration: lua test/item_types_new_test.lua
 package.loaded["main.src.log"] = { info = function() end, warn = error, }
+local item_slots_cleared = 0
+srcIntegrationNative = { clearCustomItemTypeSlots = function() item_slots_cleared = item_slots_cleared + 1 end, }
 local real_type = type
 local records, blobs, masses, writes, snapshots = {}, {}, {}, {}, {}
 local native_ints, native_floats = {}, {}
@@ -89,7 +92,7 @@ memory = {
 		blobs[index] = blobs[index]:sub(1, offset) .. bytes .. blobs[index]:sub(offset + 5)
 	end,
 }
-local state = {}
+local state = require("main.src.runtime_state").new()
 local src = {
 	syncClientItemTypes = function(player, payload)
 		assert(player == nil)
@@ -99,6 +102,7 @@ local src = {
 }
 local module = require("main.src.item_types")
 module.install(state, src)
+assert(item_slots_cleared == 1, "install must clear stale custom item type slots")
 local red = itemTypes.new("red spray can", {
 	mass = 0.25, numHands = 1, rightHandPos = { x = 1, y = 2, z = 3, },
 	leftHandPos = { class = "Vector", x = -1, y = -2, z = -3, },
@@ -161,8 +165,7 @@ local cloned = itemTypes.clone(itemTypes[25], { name = "still a clone", })
 assert(cloned.index == 48 and cloned.name == "still a clone" and blobs[48] == blobs[25],
 	"new and clone share allocation without changing clone semantics")
 assert(state.custom_item_types_by_index[48].sourceIndex == 25)
-module.install(state, src, true)
-assert(itemTypes.new("after reload").index == 49, "forced API reinstall preserves allocation")
+assert(itemTypes.new("after reload").index == 49)
 local two_handed = itemTypes.new("two hands", { numHands = 2, isOneHanded = false, })
 assert(two_handed.numHands == 2 and native_ints[two_handed.index][0x14] == 0, "native hand-field overrides work without setters")
 state.next_custom_item_type_index = 254

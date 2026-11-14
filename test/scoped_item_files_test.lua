@@ -1,7 +1,8 @@
+hook = { add = function() end, once = function(_, fn) fn() end, run = function() end, }
 -- Run from rs_integration: lua test/scoped_item_files_test.lua
 package.loaded["main.src.log"] = { info = function() end, warn = error, }
 local sent, loaded = {}, {}
-package.loaded["main.src.network"] = {
+package.loaded["main.src.network_sync_payload"] = {
 	send_item_type_it3 = function(_, _, index, path) sent[index] = path; return true end,
 	send_item_type_itm = function(_, _, index, path) sent[index] = path; return true end,
 }
@@ -18,10 +19,12 @@ memory = {
 	writeBytes = function() end,
 }
 srcIntegrationNative = {
+	clearCustomItemTypeSlots = function() end,
 	loadIT3 = function(index, path) loaded[index] = path end,
 	loadITM = function(index, path) loaded[index] = path end,
 }
-local state = { config = { clientRoot = "clientroot", }, asset_files_by_path = {}, }
+local state = require("main.src.runtime_state").new()
+state.config = { clientRoot = "clientroot", }
 local src = { syncClientItemTypes = function() return true end, }
 require("main.src.item_types").install(state, src)
 local real_open = io.open

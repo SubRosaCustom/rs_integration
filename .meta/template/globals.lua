@@ -15,12 +15,15 @@
 ---@field enabled boolean Whether the SRC runtime is enabled (config.src.enabled).
 src = {}
 
----Queue a sync refresh for all connected SRC clients using the current
----file index. This does not rescan changed files.
+---Rescan the synced content and queue a sync refresh for connected SRC clients.
+---When the rebuilt manifest is identical to the published one, nothing is
+---published and no client is notified. Notices are spread over a few seconds.
+---@return boolean notified Whether clients were notified.
 function src.refresh() end
 
 ---Re-discover scripts and selected mode/plugin assets under clientRoot, then
----queue a sync refresh for all connected SRC clients.
+---queue a sync refresh for all connected SRC clients unless the manifest is unchanged.
+---@return boolean notified Whether clients were notified.
 function src.refreshSyncFiles() end
 
 ---Register a handler for a client-to-server SRC event.
@@ -35,11 +38,12 @@ function src.onClientEvent(name, fn) end
 ---Emit a server-to-client SRC event.
 ---The server maxEventBytes setting may lower the 256 KiB limit.
 ---Ordinary reliable events exist in the published baseline; delivery is unordered.
----LOCAL-ONLY transport policy below describes protocol 10, not published protocol 9.
+---LOCAL-ONLY transport policy below describes protocol 11, not published protocol 9.
 ---Each native send flushes queued fragments and receipts in up to eight size-bounded datagrams
 ---per peer (at most 9,600 bytes); congestion limits may stop the flush sooner.
 ---No extra transport pacing timer is imposed; congestion windows and retry deadlines still apply.
 ---The complete encoded argument block is limited to 256 KiB, including serialization overhead.
+---At most 255 arguments are accepted; larger counts are rejected on encode and decode.
 ---Queue acceptance does not guarantee remote processing.
 ---Disconnects discard pending events; they are not replayed into a new session.
 ---Arguments may be nil, boolean, number, string or src.blob() values.
@@ -50,7 +54,7 @@ function src.onClientEvent(name, fn) end
 function src.emitClientEvent(player, name, ...) end
 
 ---LOCAL-ONLY API: absent from the published protocol-9 baseline.
----Send replaceable latest state over UDP (protocol 10); requires matching client/integration.
+---Send replaceable latest state over UDP (protocol 11); requires matching client/integration.
 ---Newer unsent values replace older values for the same event name and peer.
 ---No receipts, processing results or retries; packet loss can drop the final update.
 ---Older sequence IDs are discarded. At most 32 distinct names per session.
@@ -64,7 +68,9 @@ function src.emitClientEventLatest(player, name, ...) end
 
 ---Request a synced client plugin reload on all connected SRC clients.
 ---Asset contents, selected owners, effective mode or level changes promote it to a full replay.
+---Sends nothing when the rebuilt manifest is identical to the published one.
 ---@param plugin_name string The plugin file name.
+---@return boolean notified Whether clients were notified.
 function src.reloadClientPlugin(plugin_name) end
 
 ---Send a custom item type sync payload to clients.
@@ -189,14 +195,6 @@ function src.registerHumanNecktie(index, def) end
 ---@param def SrcHumanModelDef The male/female CMC names.
 ---@return integer index The normalized accessory index.
 function src.registerHumanNecklace(index, def) end
-
----Delete a world block on the server and sync the deletion to SRC clients.
----Sync starts at PostResetGame and is suspended during ResetGame/map loading.
----@param x integer The block X coordinate.
----@param y integer The block Y coordinate.
----@param z integer The block Z coordinate.
----@return boolean deleted False when the block was already empty.
-function src.deleteBlock(x, y, z) end
 
 ---Get the SRC connection state of a player's client.
 ---@param player Player The player to query.

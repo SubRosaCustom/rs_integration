@@ -23,15 +23,17 @@ local reliable = require("main.src.reliable_udp")
 local token = string.rep("a", 32)
 local connection = { address = "127.0.0.1", is_open = true, close = function(self) self.is_open = false end, }
 local client = {
-	udp_token = token, hello = true, bound = true, udp_events_ready = true,
+	udp_token = token, warn_limits = {}, hello = true, bound = true, udp_events_ready = true,
 	game_address = "127.0.0.1", game_port = 27071,
 	player = { connection = { address = "127.0.0.1", port = 27071, }, },
 }
-local state = { clients = { [connection] = client, }, config = { maxEventBytes = 262144, }, }
+local state = { clients_by_token = {}, clients_by_endpoint = {}, udp_backlog = {}, clients = { [connection] = client, }, config = { maxEventBytes = 262144, }, }
+udp.set_token(state, connection, client, token)
+udp.bind_endpoint(state, connection, client)
 local remote = reliable.new()
 local event_hash = assert(udp.hash_event_name("test.fragments"))
 local value = string.rep("x", 262130)
-local arguments = assert(codec.encode_args(value))
+local arguments = assert(codec.encode(value))
 assert(#arguments == 262144)
 assert(not udp.encode_reliable_event(event_hash, 7, arguments .. "x"))
 local event = assert(udp.encode_reliable_event(event_hash, 7, arguments))
@@ -92,11 +94,11 @@ assert(old_peer.bytes == 0)
 print("UDP adapter: 256 KiB event/result, duplicate drain, MTU fallback and reset passed")
 
 -- One native send callback carries both queued events, without advancing wall time.
-client.udp_token = token
+udp.set_token(state, connection, client, token)
 client.udp_events_ready = true
 udp.on_send_packet(state, "127.0.0.1", 27071) -- Initial size probe.
 outbound = {}
-local small = assert(codec.encode_args("small"))
+local small = assert(codec.encode("small"))
 assert(udp.enqueue(client, assert(udp.encode_reliable_event(event_hash, 201, small))))
 assert(udp.enqueue(client, assert(udp.encode_reliable_result(event_hash, 202, small))))
 udp.on_send_packet(state, "127.0.0.1", 27071)
@@ -108,7 +110,8 @@ print("UDP adapter: one native send batches event/result without a pacing delay 
 
 local function fresh_peer()
     udp.reset_client(client)
-    client.udp_token, client.udp_events_ready = token, true
+    udp.set_token(state, connection, client, token)
+    client.udp_events_ready = true
     udp.tick(client)
     client.udp_reliable.probe_due = time + 60
     outbound = {}
@@ -131,7 +134,7 @@ udp.on_send_packet(state, "127.0.0.1", 27071)
 assert(#outbound > 0 and #outbound <= 8 and not next(peer.acks), "Next send continues without advancing time")
 outbound = {}; udp.on_send_packet(state, "127.0.0.1", 27071); assert(#outbound == 0, "Idle flush sends nothing")
 peer = fresh_peer()
-local medium = assert(codec.encode_args(string.rep("x",400)))
+local medium = assert(codec.encode(string.rep("x",400)))
 for id=1,4 do assert(udp.enqueue(client, assert(udp.encode_reliable_event(event_hash,id,medium)))) end
 udp.on_send_packet(state, "127.0.0.1", 27071)
 assert(#outbound == 2, "Congestion window stops a burst before the flush budget")

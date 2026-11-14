@@ -1,25 +1,79 @@
 local sync_paths = require("main.src.sync_paths")
 local client_scope = require("main.src.client_scope")
+local log = require("main.src.log")
+local utf8_sanitize = require("main.src.utf8_sanitize")
 local has_miniz_integration = pcall(require, "libminiz")
 
-local M = {}
+local sync_snapshot = {}
 local MAX_SNAPSHOT_FILES = 4096
 local MAX_SNAPSHOT_BYTES = 256 * 1024 * 1024
 local MAX_SCRIPT_BYTES = 2 * 1024 * 1024
 local MAX_ASSET_BYTES = 128 * 1024 * 1024
 local MAX_SYNC_PATH_BYTES = 1024
 
-local function read_snapshot_file(state, path, sync_path, limit)
+-- unchanged files (same size and mtime) aren't re-read or re-hashed
+-- config.yml and disabledPlugins.json are always read
+local ALWAYS_READ = { ["config.yml"] = true, ["disabledPlugins.json"] = true, }
+
+local RECENT_WRITE_SECONDS = 2
+
+-- getLastWriteTime uses the filesystem clock, so read "now" from a fresh file instead of os.time
+local function filesystem_now()
+	local path = os.tmpname()
+	local file = assert(io.open(path, "wb"))
+	file:close()
+	local now = os.getLastWriteTime(path)
+	os.remove(path)
+	return now
+end
+
+local function snapshot_file_info(state, path, sync_path, limit, force_read)
 	assert(#sync_path <= MAX_SYNC_PATH_BYTES, "Sync path exceeds size limit: " .. sync_path)
 	assert(state.snapshot_file_count < MAX_SNAPSHOT_FILES, "Sync snapshot exceeds file count limit")
-	local remaining = MAX_SNAPSHOT_BYTES - state.snapshot_bytes
-	local bytes = sync_paths.read_file(path, math.min(limit, remaining))
-	if bytes then
-		assert(#bytes <= limit and #bytes <= remaining, "Sync snapshot exceeds byte limit: " .. sync_path)
-		state.snapshot_file_count = state.snapshot_file_count + 1
-		state.snapshot_bytes = state.snapshot_bytes + #bytes
+	local size = sync_paths.file_size(path)
+	if not size then
+		return nil
 	end
-	return bytes
+	local mtime = os.getLastWriteTime(path)
+	local remaining = MAX_SNAPSHOT_BYTES - state.snapshot_bytes
+	assert(size <= limit and size <= remaining, "Sync snapshot exceeds byte limit: " .. sync_path)
+	local info = { size = size, mtime = mtime, }
+	local cached = state.previous_file_hashes[path]
+	-- a file written within the timestamp granularity of the scan can change again with the same mtime
+	local settled = mtime < state.scan_clock - RECENT_WRITE_SECONDS
+	if cached and settled and not force_read and cached.size == size and cached.mtime == mtime then
+		info.sha256 = cached.sha256
+	else
+		local bytes = sync_paths.read_file(path, math.min(limit, remaining))
+		if not bytes then
+			return nil
+		end
+		assert(#bytes <= limit and #bytes <= remaining, "Sync snapshot exceeds byte limit: " .. sync_path)
+		info.bytes, info.size, info.sha256 = bytes, #bytes, crypto.sha256(bytes)
+	end
+	state.snapshot_file_count = state.snapshot_file_count + 1
+	state.snapshot_bytes = state.snapshot_bytes + info.size
+	state.file_hashes[path] = { size = info.size, mtime = mtime, sha256 = info.sha256, }
+	return info
+end
+
+local function escape_path(path)
+	return (path:gsub("[^%w%._/%-]", function(byte) return string.format("\\x%02X", byte:byte()) end))
+end
+
+-- non-UTF-8 names can't be advertised, report once
+local function note_unsyncable_name(state, directory, entry)
+	if utf8_sanitize.is_valid(entry.name) then
+		return
+	end
+	if not entry.isDirectory and not sync_paths.is_invalid_utf8_syncable_name(entry.name) then
+		return
+	end
+	local path = sync_paths.join(directory, entry.name)
+	state.invalid_names_seen[path] = true
+	if not state.invalid_names_warned[path] then
+		log.warn("Not syncing %s: its name is not valid UTF-8; rename it", escape_path(path))
+	end
 end
 
 local function to_lower(value)
@@ -29,14 +83,10 @@ local function to_lower(value)
 	return string.lower(value)
 end
 
-local bitlib = bit32
-if not bitlib then
-	bitlib = require("bit")
-end
 
-local band = bitlib.band
-local bxor = bitlib.bxor
-local rshift = bitlib.rshift
+local band = bit32.band
+local bxor = bit32.bxor
+local rshift = bit32.rshift
 
 local DEFAULT_GAME_MODEL_CMO_FILES = {
 	["9mm.cmo"] = true,
@@ -168,6 +218,7 @@ local function new_bundle(id, kind)
 		kind = kind,
 		files = {},
 		archive_inputs = {},
+		lazy_sources = {},
 		archive = "",
 		size = 0,
 		archive_sha256 = "",
@@ -190,7 +241,15 @@ local function bundle_content_hash(files)
 	return crypto.sha256(table.concat(parts, "\n"))
 end
 
-local function finalize_bundle(bundle)
+local ZIP_OPTIONS = {
+	level = 3,
+	store = { ".png", ".wav", ".ogg", ".jpg", ".jpeg", },
+}
+
+sync_snapshot.ZIP_OPTIONS = ZIP_OPTIONS
+
+-- previous_bundles reuses archives of unchanged files
+local function finalize_bundle(bundle, previous_bundles)
 	if #bundle.files == 0 then
 		return nil
 	end
@@ -199,13 +258,33 @@ local function finalize_bundle(bundle)
 		return a.path < b.path
 	end)
 
-	local integration = require_zip_integration()
-	local archive = integration.createZip(bundle.archive_inputs)
-	bundle.archive = archive
-	bundle.size = #archive
-	bundle.archive_sha256 = crypto.sha256(archive)
 	bundle.content_sha256 = bundle_content_hash(bundle.files)
+	local previous = previous_bundles and previous_bundles[bundle.id]
+	if previous and previous.content_sha256 == bundle.content_sha256
+		and previous.kind == bundle.kind and previous.archive ~= "" then
+		bundle.archive = previous.archive
+		bundle.size = previous.size
+		bundle.archive_sha256 = previous.archive_sha256
+		bundle.reused = true
+	else
+		local integration = require_zip_integration()
+		for path, bytes in pairs(bundle.archive_inputs) do
+			if bytes == false then
+				local source = bundle.lazy_sources[path]
+				bytes = sync_paths.read_file(source.source_path, source.size)
+				assert(bytes ~= nil and #bytes == source.size and crypto.sha256(bytes) == source.sha256,
+					"Sync file changed while building snapshot: " .. path)
+				bundle.archive_inputs[path] = bytes
+			end
+		end
+		local archive = integration.createZip(bundle.archive_inputs, ZIP_OPTIONS)
+		bundle.archive = archive
+		bundle.size = #archive
+		bundle.archive_sha256 = crypto.sha256(archive)
+		bundle.reused = false
+	end
 	bundle.archive_inputs = nil
+	bundle.lazy_sources = nil
 	return bundle
 end
 
@@ -248,7 +327,12 @@ local function append_snapshot_record(state, bundle, record, bytes)
 		state.asset_files_by_path[snapshot_record.path] = snapshot_record
 	end
 
-	bundle.archive_inputs[snapshot_record.path] = bytes
+	bundle.archive_inputs[snapshot_record.path] = bytes or false
+	if not bytes then
+		bundle.lazy_sources[snapshot_record.path] = {
+			source_path = record.source_path, size = record.size, sha256 = record.sha256,
+		}
+	end
 	table.insert(bundle.files, {
 		path = snapshot_record.path,
 		size = snapshot_record.size,
@@ -267,12 +351,13 @@ local function collect_scripts_recursive(state, bundle, root, relative_path)
 	end
 
 	local ok, entries = pcall(os.listDirectory, current)
-	if not ok or type(entries) ~= "table" then
-		return
-	end
+	assert(ok and type(entries) == "table", "Cannot enumerate script root: " .. current)
 
 	table.sort(entries, function(a, b) return a.name < b.name end)
 	for _, entry in ipairs(entries) do
+		-- no symlinks or unsafe components
+		if not sync_paths.is_contained(root, sync_paths.join(current, entry.name)) then goto continue end
+		note_unsyncable_name(state, current, entry)
 		if entry.isDirectory then
 			if relative_path == "" and (entry.name == "assets" or entry.name == "scripts") then
 				goto continue
@@ -291,16 +376,17 @@ local function collect_scripts_recursive(state, bundle, root, relative_path)
 
 			if sync_paths.is_safe_script(relative_pathname) then
 				local full_path = sync_paths.join(root, relative_pathname)
-				local bytes = read_snapshot_file(state, full_path, relative_pathname, MAX_SCRIPT_BYTES)
-				if bytes then
+				local info = snapshot_file_info(state, full_path, relative_pathname, MAX_SCRIPT_BYTES,
+					ALWAYS_READ[relative_pathname])
+				if info then
 					append_snapshot_record(state, bundle, {
 						path = relative_pathname,
-						size = #bytes,
-						sha256 = crypto.sha256(bytes),
-						mtime = os.getLastWriteTime(full_path),
+						size = info.size,
+						sha256 = info.sha256,
+						mtime = info.mtime,
 						source_path = full_path,
 						kind = "script",
-					}, bytes)
+					}, info.bytes)
 				end
 			end
 		end
@@ -309,7 +395,7 @@ local function collect_scripts_recursive(state, bundle, root, relative_path)
 	end
 end
 
-function M.normalize_loaded_level(raw_level)
+function sync_snapshot.normalize_loaded_level(raw_level)
 	if type(raw_level) ~= "string" then
 		return ""
 	end
@@ -332,25 +418,25 @@ function M.normalize_loaded_level(raw_level)
 	return level
 end
 
-function M.normalize_persistent_mode(raw_mode)
+function sync_snapshot.normalize_persistent_mode(raw_mode)
 	if type(raw_mode) ~= "string" then return "" end
 	local mode = raw_mode:gsub("%.lua$", "")
 	return client_scope.valid_owner(mode) and mode or ""
 end
 
-function M.discover_persistent_mode(state, client_config_source)
+function sync_snapshot.discover_persistent_mode(state, client_config_source)
 	local raw_mode = nil
 	if type(hook) == "table" then
 		raw_mode = hook.persistentMode
 	end
 
-	state.server_persistent_mode = M.normalize_persistent_mode(raw_mode)
+	state.server_persistent_mode = sync_snapshot.normalize_persistent_mode(raw_mode)
 	state.persistent_mode = state.server_persistent_mode
 	if state.persistent_mode == "" and client_config_source and client_config_source ~= "" then
 		local yaml = require("main.yaml")
 		local ok, client_config = pcall(yaml.parse, client_config_source)
 		assert(ok and type(client_config) == "table", "Invalid client config.yml")
-		state.persistent_mode = M.normalize_persistent_mode(client_config.defaultGameMode)
+		state.persistent_mode = sync_snapshot.normalize_persistent_mode(client_config.defaultGameMode)
 	end
 	return state.persistent_mode
 end
@@ -371,6 +457,7 @@ local function collect_asset_files_recursive(state, bundle, root, sync_root_pref
 		-- Reject unsafe components before either recursion or reads.
 		local candidate = sync_paths.join(current, entry.name)
 		if not sync_paths.is_contained(root, candidate) then goto continue end
+		note_unsyncable_name(state, current, entry)
 		if entry.isDirectory then
 			local child = entry.name
 			if relative_path ~= "" then
@@ -391,20 +478,19 @@ local function collect_asset_files_recursive(state, bundle, root, sync_root_pref
 			if sync_paths.is_safe_asset(sync_path) then
 				local should_skip = should_skip_bundled_model_cmo(sync_path)
 				if not should_skip then
-					local bytes = assert(read_snapshot_file(state, full_path, sync_path, MAX_ASSET_BYTES), "Cannot read asset: " .. full_path)
-					if bytes then
-						if should_skip_bundled_vehicle_sbv(sync_path, bytes) then
-							goto continue
-						end
-						append_snapshot_record(state, bundle, {
-							path = sync_path,
-							size = #bytes,
-							sha256 = crypto.sha256(bytes),
-							mtime = os.getLastWriteTime(full_path),
-							source_path = full_path,
-							kind = "asset",
-						}, bytes)
+					local info = assert(snapshot_file_info(state, full_path, sync_path, MAX_ASSET_BYTES,
+						DEFAULT_GAME_VEHICLE_SBV_CRC32[to_lower(sync_path)] ~= nil), "Cannot read asset: " .. full_path)
+					if info.bytes and should_skip_bundled_vehicle_sbv(sync_path, info.bytes) then
+						goto continue
 					end
+					append_snapshot_record(state, bundle, {
+						path = sync_path,
+						size = info.size,
+						sha256 = info.sha256,
+						mtime = info.mtime,
+						source_path = full_path,
+						kind = "asset",
+					}, info.bytes)
 				end
 			end
 		end
@@ -421,6 +507,7 @@ local function collect_top_level_vehicle_sbv_files(state, bundle, root, sync_roo
 	table.sort(entries, function(a, b) return a.name < b.name end)
 	for _, entry in ipairs(entries) do
 		if not entry.isDirectory then
+			note_unsyncable_name(state, root, entry)
 			local relative_path = entry.name
 			local sync_path = relative_path
 			if sync_root_prefix ~= "" then
@@ -429,19 +516,20 @@ local function collect_top_level_vehicle_sbv_files(state, bundle, root, sync_roo
 
 			if sync_paths.extension(sync_path) == ".sbv" and sync_paths.is_safe_asset(sync_path) then
 				local full_path = sync_paths.join(root, relative_path)
-				local bytes = read_snapshot_file(state, full_path, sync_path, MAX_ASSET_BYTES)
-				if bytes then
-					if should_skip_bundled_vehicle_sbv(sync_path, bytes) then
+				local info = snapshot_file_info(state, full_path, sync_path, MAX_ASSET_BYTES,
+					DEFAULT_GAME_VEHICLE_SBV_CRC32[to_lower(sync_path)] ~= nil)
+				if info then
+					if info.bytes and should_skip_bundled_vehicle_sbv(sync_path, info.bytes) then
 						goto continue
 					end
 					append_snapshot_record(state, bundle, {
 						path = sync_path,
-						size = #bytes,
-						sha256 = crypto.sha256(bytes),
-						mtime = os.getLastWriteTime(full_path),
+						size = info.size,
+						sha256 = info.sha256,
+						mtime = info.mtime,
 						source_path = full_path,
 						kind = "asset",
-					}, bytes)
+					}, info.bytes)
 				end
 			end
 		end
@@ -449,11 +537,14 @@ local function collect_top_level_vehicle_sbv_files(state, bundle, root, sync_roo
 	end
 end
 
-local function build_snapshot(state)
+local function build_snapshot(state, previous_bundles)
 	reset_sync_snapshot(state)
+	state.file_hashes = {}
+	state.invalid_names_seen = {}
 	state.snapshot_file_count = 0
 	state.snapshot_bytes = 0
-	local normalized_level = M.normalize_loaded_level(server and server.loadedLevel or nil)
+	state.scan_clock = filesystem_now()
+	local normalized_level = sync_snapshot.normalize_loaded_level(server and server.loadedLevel or nil)
 	state.loaded_level = normalized_level
 
 	pcall(os.createDirectory, state.config.clientRoot)
@@ -465,16 +556,10 @@ local function build_snapshot(state)
 	local enabled, disabled_source = client_scope.enabled(state.config)
 	local client_bundle = new_bundle("clientroot", "clientroot")
 	collect_scripts_recursive(state, client_bundle, scripts_root, "")
-	local using_legacy_scripts = #state.scripts == 0
-	if using_legacy_scripts then
-		collect_scripts_recursive(state, client_bundle, state.config.clientRoot, "")
-	end
-	if not using_legacy_scripts or disabled_source ~= nil then
-		assert(client_bundle.archive_inputs["disabledPlugins.json"] == disabled_source,
-			"Client disable state changed while building snapshot")
-	end
+	assert(client_bundle.archive_inputs["disabledPlugins.json"] == disabled_source,
+		"Client disable state changed while building snapshot")
 	-- Select assets from the same immutable config bytes that core will receive.
-	M.discover_persistent_mode(state, client_bundle.archive_inputs["config.yml"])
+	sync_snapshot.discover_persistent_mode(state, client_bundle.archive_inputs["config.yml"])
 	state.client_plugin_signature = table.concat(enabled, "\n")
 	local function collect_owner(namespace, owner)
 		local root = sync_paths.join(assets_root, namespace .. "/" .. owner)
@@ -487,7 +572,7 @@ local function build_snapshot(state)
 	for _, name in ipairs(enabled) do collect_owner("plugins", name) end
 	collect_top_level_vehicle_sbv_files(state, client_bundle, "data", "data")
 
-	client_bundle = finalize_bundle(client_bundle)
+	client_bundle = finalize_bundle(client_bundle, previous_bundles)
 	if client_bundle then
 		table.insert(state.sync_bundles, client_bundle)
 		state.sync_bundles_by_id[client_bundle.id] = client_bundle
@@ -499,7 +584,7 @@ local function build_snapshot(state)
 		if sync_paths.exists(level_sync_root) then
 			collect_asset_files_recursive(state, map_bundle, level_sync_root, level_sync_root, "")
 		end
-		map_bundle = finalize_bundle(map_bundle)
+		map_bundle = finalize_bundle(map_bundle, previous_bundles)
 		if map_bundle then
 			table.insert(state.sync_bundles, map_bundle)
 			state.sync_bundles_by_id[map_bundle.id] = map_bundle
@@ -523,8 +608,6 @@ local function build_snapshot(state)
 		manifest[#manifest + 1] = table.concat({
 			bundle.id,
 			bundle.kind,
-			tostring(bundle.size),
-			bundle.archive_sha256,
 			bundle.content_sha256,
 		}, "|")
 	end
@@ -535,26 +618,58 @@ local function build_snapshot(state)
 	return state.scripts, state.asset_files, state.sync_bundles
 end
 
-function M.discover(state)
+function sync_snapshot.discover(state)
 	-- A conflict or malformed scope must not replace a valid published snapshot.
-	local next_state = { config = state.config }
-	build_snapshot(next_state)
+	local next_state = {
+		config = state.config,
+		previous_file_hashes = state.snapshot_file_hashes or {},
+		invalid_names_warned = state.invalid_names_warned or {},
+	}
+	build_snapshot(next_state, state.sync_bundles_by_id)
 	for _, key in ipairs({ "scripts", "scripts_by_path", "asset_files", "asset_files_by_path", "asset_paths_folded",
 		"sync_bundles", "sync_bundles_by_id", "loaded_level", "persistent_mode", "server_persistent_mode",
 		"client_plugin_signature", "manifest_hash" }) do
 		state[key] = next_state[key]
 	end
+	-- only a good scan replaces these, so a failed one can't poison the hash cache
+	state.snapshot_file_hashes = next_state.file_hashes
+	state.invalid_names_warned = next_state.invalid_names_seen
 	return state.scripts, state.asset_files, state.sync_bundles
 end
 
-function M.discover_scripts(state)
-	M.discover(state)
+-- the worker holds the archive bytes after it confirms; main keeps only metadata
+function sync_snapshot.release_archives(state)
+	for _, bundle in ipairs(state.sync_bundles) do
+		bundle.archive = nil
+	end
+end
+
+function sync_snapshot.restore_archives(state)
+	local integration = require_zip_integration()
+	for _, bundle in ipairs(state.sync_bundles) do
+		if not bundle.archive then
+			local inputs = {}
+			for _, file in ipairs(bundle.files) do
+				local record = state.scripts_by_path[file.path] or state.asset_files_by_path[file.path]
+				local bytes = record and sync_paths.read_file(record.source_path, file.size)
+				assert(bytes ~= nil and #bytes == file.size and crypto.sha256(bytes) == file.sha256,
+					"Sync file changed since snapshot: " .. file.path)
+				inputs[file.path] = bytes
+			end
+			local archive = integration.createZip(inputs, ZIP_OPTIONS)
+			bundle.archive, bundle.size, bundle.archive_sha256 = archive, #archive, crypto.sha256(archive)
+		end
+	end
+end
+
+function sync_snapshot.discover_scripts(state)
+	sync_snapshot.discover(state)
 	return state.scripts
 end
 
-function M.discover_asset_files(state)
-	M.discover(state)
+function sync_snapshot.discover_asset_files(state)
+	sync_snapshot.discover(state)
 	return state.asset_files
 end
 
-return M
+return sync_snapshot

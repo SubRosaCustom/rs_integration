@@ -1,4 +1,6 @@
-local M = {}
+-- disabled: one reliable event per deleted block overflowed the 32-per-peer cap and desynced clients.
+-- restore only after batching deletions into bounded snapshots.
+local world_mutations = {}
 
 local DELETE_EVENT = "src.world.deleteBlock"
 local RESET_EVENT = "src.world.resetBlocks"
@@ -12,7 +14,7 @@ local function key(x, y, z)
 	return string.format("%d:%d:%d", x, y, z)
 end
 
-function M.install(state, src)
+function world_mutations.install(state, src)
 	state.world_mutation_generation = state.world_mutation_generation or 1
 	state.deleted_world_blocks = state.deleted_world_blocks or {}
 	state.world_mutations_ready = state.world_mutations_ready == true
@@ -72,7 +74,7 @@ function M.install(state, src)
 	hook.add("PostResetGame", "main.src.worldMutations", reset_mutations)
 end
 
-function M.sync(state, src, player)
+function world_mutations.sync(state, src, player)
 	if not state.world_mutations_ready or type(src) ~= "table"
 		or type(src.emitClientEvent) ~= "function" then
 		return
@@ -91,4 +93,4 @@ function M.sync(state, src, player)
 	end
 end
 
-return M
+return world_mutations

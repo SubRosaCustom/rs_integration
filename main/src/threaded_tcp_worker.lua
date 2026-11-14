@@ -1,5 +1,6 @@
 local codec = require("main.src.threaded_tcp_codec")
 local json = require("main.json")
+local utf8_sanitize = require("main.src.utf8_sanitize")
 require("libminiz")
 
 local READ_SIZE = 16384
@@ -15,7 +16,32 @@ local STATS_INTERVAL_SECONDS = 1
 local tcp_server
 local connections = {}
 local bundle_cache = {}
-local snapshot = { manifest = "", files = {}, }
+local PARTIAL_ZIP_OPTIONS = {
+	level = 3,
+	store = { ".png", ".wav", ".ogg", ".jpg", ".jpeg", },
+}
+
+-- files are extracted from their bundle on first use
+local extracted_cache = {}
+local snapshot = { manifest = "", records = {}, bundles = {}, }
+local verified_archives = {}
+-- partial ZIPs are shared by identical requests, one build per pass
+local MAX_PARTIAL_CACHE_ENTRIES = 32
+local MAX_PARTIAL_CACHE_BYTES = 64 * 1024 * 1024
+local partial_cache = {}
+local partial_cache_order = {}
+local partial_cache_bytes = 0
+local partial_queue = {}
+
+local function purge_partial_queue(id)
+	local retained = {}
+	for _, entry in ipairs(partial_queue) do
+		if entry.id ~= id then
+			retained[#retained + 1] = entry
+		end
+	end
+	partial_queue = retained
+end
 local connection_count = 0
 local next_connection_id = 1
 
@@ -134,6 +160,7 @@ local function close_connection(id)
 	end
 
 	close_stream(connection)
+	purge_partial_queue(id)
 	release_send_queue(id, connection)
 	if connection.socket.isOpen then
 		pcall(connection.socket.close, connection.socket)
@@ -156,6 +183,7 @@ local function cache_bundle(payload)
 
 	local bundle_id = payload:sub(3, archive_offset - 1)
 	bundle_cache[bundle_id] = payload:sub(archive_offset)
+	verified_archives[bundle_id] = nil
 end
 
 local function open_bundle_stream(connection, payload, generation)
@@ -191,40 +219,94 @@ end
 
 local function set_snapshot(payload)
 	local description = json.decode(payload)
-	local next_snapshot = { manifest = description.manifest, files = {}, }
+	local next_snapshot = { manifest = description.manifest, records = {}, bundles = {}, }
 	local next_cache = {}
+	local next_extracted = {}
+	local next_verified = {}
 	for _, bundle in ipairs(description.bundles) do
 		local archive = assert(bundle_cache[bundle.id], "snapshot bundle missing")
-		local extracted = miniz.extractZip(archive)
+		-- archive hash is checked here, extraction waits for the first request
+		if bundle.archive_sha256 ~= nil then
+			if verified_archives[bundle.id] == bundle.archive_sha256 then
+				next_verified[bundle.id] = bundle.archive_sha256
+			else
+				assert(crypto.sha256(archive) == bundle.archive_sha256, "invalid snapshot archive")
+				next_verified[bundle.id] = bundle.archive_sha256
+			end
+		end
+		local cached = extracted_cache[bundle.id]
+		if cached and bundle.archive_sha256 ~= nil and cached.archive_sha256 == bundle.archive_sha256 and cached.archive == archive then
+			next_extracted[bundle.id] = cached
+		end
+		next_snapshot.bundles[bundle.id] = { archive = archive, files = bundle.files, }
 		for _, record in ipairs(bundle.files) do
-			local bytes = extracted[record.path]
-			assert(type(bytes) == "string" and #bytes == record.size
-				and crypto.sha256(bytes) == record.sha256, "invalid snapshot file")
-			next_snapshot.files[record.path] = bytes
+			next_snapshot.records[record.path] = { bundle = bundle.id, size = record.size, sha256 = record.sha256, }
+		end
+		if next_extracted[bundle.id] == nil then
+			next_extracted[bundle.id] = { archive_sha256 = bundle.archive_sha256, archive = archive, }
 		end
 		next_cache[bundle.id] = archive
 	end
 	-- Refresh sends ordered DISCARD_SENDS commands to release old per-client streams.
 	-- The cache itself retains only this immutable snapshot.
 	bundle_cache = next_cache
+	extracted_cache = next_extracted
+	verified_archives = next_verified
 	snapshot = next_snapshot
+	partial_cache, partial_cache_order, partial_cache_bytes = {}, {}, 0
+	sendMessage(codec.encode(codec.SNAPSHOT_READY, 0, 0, description.manifest))
 end
 
-local function start_partial(connection, payload, generation)
-	local request = json.decode(payload)
+-- extract a bundle on first use, verify each file against the manifest
+local function snapshot_file(path)
+	local record = assert(snapshot.records[path], "partial path not in snapshot")
+	local entry = assert(extracted_cache[record.bundle], "snapshot bundle missing")
+	if not entry.extracted then
+		local extracted = miniz.extractZip(entry.archive)
+		for _, file in ipairs(snapshot.bundles[record.bundle].files) do
+			local bytes = extracted[file.path]
+			assert(type(bytes) == "string" and #bytes == file.size
+				and crypto.sha256(bytes) == file.sha256, "invalid snapshot file")
+		end
+		entry.extracted = extracted
+	end
+	return entry.extracted[path]
+end
+
+local function cache_partial(key, archive)
+	if #archive > MAX_PARTIAL_CACHE_BYTES then
+		return
+	end
+	partial_cache[key] = archive
+	partial_cache_order[#partial_cache_order + 1] = key
+	partial_cache_bytes = partial_cache_bytes + #archive
+	while #partial_cache_order > MAX_PARTIAL_CACHE_ENTRIES or partial_cache_bytes > MAX_PARTIAL_CACHE_BYTES do
+		local evicted = table.remove(partial_cache_order, 1)
+		partial_cache_bytes = partial_cache_bytes - #partial_cache[evicted]
+		partial_cache[evicted] = nil
+	end
+end
+
+-- returns the cache key (sorted file set)
+local function validate_partial(request)
 	assert(request.manifest == snapshot.manifest, "stale bundle request")
 	assert(type(request.paths) == "table" and #request.paths > 0, "invalid partial paths")
-	local inputs = {}
+	local seen, sorted = {}, {}
 	for _, path in ipairs(request.paths) do
-		assert(type(path) == "string" and not inputs[path], "invalid or duplicate partial path")
-		inputs[path] = assert(snapshot.files[path], "partial path not in snapshot")
+		assert(type(path) == "string" and not seen[path], "invalid or duplicate partial path")
+		assert(snapshot.records[path], "partial path not in snapshot")
+		seen[path] = true
+		sorted[#sorted + 1] = path
 	end
 	local expected = "partial-" .. crypto.sha256(
 		snapshot.manifest .. table.concat(request.paths, "\n") .. "\n"
 	):sub(1, 16)
 	assert(request.id == expected, "invalid partial bundle id")
-	local archive = miniz.createZip(inputs)
-	assert(type(archive) == "string" and #archive > 0, "failed creating partial ZIP")
+	table.sort(sorted)
+	return crypto.sha256(snapshot.manifest .. "\n" .. table.concat(sorted, "\n"))
+end
+
+local function begin_partial(connection, request, archive, generation)
 	connection.send_queue[#connection.send_queue + 1] = {
 		bytes = json.encode({ type = "BUNDLE_BEGIN", payload = {
 			id = request.id, size = #archive, archiveSha256 = crypto.sha256(archive),
@@ -235,6 +317,50 @@ local function start_partial(connection, payload, generation)
 		id = request.id, archive = archive, offset = 1, generation = generation or 0,
 		end_frame = json.encode({ type = "BUNDLE_END", payload = { id = request.id, } }) .. "\n",
 	}
+end
+
+-- true after a ZIP build, false on a cache hit
+local function start_partial(connection, payload, generation)
+	local request = json.decode(payload)
+	local key = validate_partial(request)
+	local archive = partial_cache[key]
+	local built = archive == nil
+	if built then
+		local inputs = {}
+		for _, path in ipairs(request.paths) do
+			inputs[path] = snapshot_file(path)
+		end
+		archive = miniz.createZip(inputs, PARTIAL_ZIP_OPTIONS)
+		assert(type(archive) == "string" and #archive > 0, "failed creating partial ZIP")
+		cache_partial(key, archive)
+	end
+	begin_partial(connection, request, archive, generation)
+	return built
+end
+
+local function report_partial_failure(connection, failure, generation)
+	connection.send_queue[#connection.send_queue + 1] = {
+		bytes = json.encode({ type = "ERROR_REPORT", payload = {
+			error = utf8_sanitize.sanitize(tostring(failure)),
+		} }) .. "\n", offset = 1, main_owned = false, stream_end = true,
+		stream_generation = generation,
+	}
+end
+
+-- one partial request per client, so FIFO is round-robin; one ZIP build per pass
+local function process_partial_queue()
+	while #partial_queue > 0 do
+		local entry = table.remove(partial_queue, 1)
+		local connection = connections[entry.id]
+		if connection then
+			local ok, built = pcall(start_partial, connection, entry.payload, entry.generation)
+			if not ok then
+				report_partial_failure(connection, built, entry.generation)
+			elseif built then
+				return
+			end
+		end
+	end
 end
 
 local function fill_stream_queue(connection)
@@ -296,15 +422,9 @@ local function handle_command(command)
 	local connection = connections[command.id]
 	if command.kind == codec.START_PARTIAL then
 		if connection then
-			local ok, failure = pcall(start_partial, connection, command.payload, command.value)
-			if not ok then
-				connection.send_queue[#connection.send_queue + 1] = {
-					bytes = json.encode({ type = "ERROR_REPORT", payload = {
-						error = tostring(failure),
-					} }) .. "\n", offset = 1, main_owned = false, stream_end = true,
-					stream_generation = command.value,
-				}
-			end
+			partial_queue[#partial_queue + 1] = {
+				id = command.id, payload = command.payload, generation = command.value,
+			}
 		end
 		return
 	end
@@ -334,6 +454,7 @@ local function handle_command(command)
 		return
 	end
 	if command.kind == codec.DISCARD_SENDS then
+		purge_partial_queue(command.id)
 		if connection then
 			close_stream(connection)
 			discard_unsent_frames(command.id, connection, command.value, command.payload)
@@ -511,6 +632,7 @@ end
 
 local function run_pass()
 	process_commands()
+	process_partial_queue()
 	accept_connections()
 	process_connections()
 end

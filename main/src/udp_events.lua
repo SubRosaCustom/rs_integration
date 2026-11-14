@@ -3,9 +3,33 @@ local event_codec = require("main.src.event_codec")
 
 local reliable_udp = require("main.src.reliable_udp")
 local peers = setmetatable({}, { __mode = "k", })
-local M = {}
+local udp_events = {}
 
-local function buffered_bytes()
+local MAX_GLOBAL_BUFFERED_BYTES = 16 * 1024 * 1024
+-- floor per client, so a full global budget never starves a quiet one
+local MIN_CLIENT_BUFFERED_BYTES = 128 * 1024
+local peer_count = 0
+
+-- inbound token buckets per client
+local DATAGRAM_RATE, DATAGRAM_BURST = 240, 64
+local EVENT_RATE, EVENT_BURST = 120, 32
+local MAX_INBOX_DATAGRAMS = 128
+local MAX_PENDING_MESSAGES = 256
+local OVER_LIMIT_DISCONNECT_SECONDS = 5
+
+local fallback_warn_limits = {}
+
+-- keyed per client and fixed kind strings
+function udp_events.warn_limited(client, kind, ...)
+	local limits = fallback_warn_limits
+	if client then
+		limits = client.warn_limits
+	end
+	log.warn_limited(limits, kind, ...)
+end
+
+-- test hook: the global counter must equal this sum
+function udp_events.buffered_bytes_sum()
 	local total = 0
 	for peer in pairs(peers) do
 		total = total + peer.bytes
@@ -13,12 +37,25 @@ local function buffered_bytes()
 	return total
 end
 
+function udp_events.buffered_bytes()
+	return reliable_udp.total_bytes()
+end
+
 local function get_peer(client)
 	if not client.udp_reliable then
 		client.udp_reliable = reliable_udp.new()
 		peers[client.udp_reliable] = true
+		peer_count = peer_count + 1
 	end
 	return client.udp_reliable
+end
+
+-- bytes this client may still buffer: its share of the global budget, not below the floor
+local function client_available_bytes(peer)
+	local share = math.max(MIN_CLIENT_BUFFERED_BYTES, MAX_GLOBAL_BUFFERED_BYTES // math.max(1, peer_count))
+	local global_room = MAX_GLOBAL_BUFFERED_BYTES - reliable_udp.total_bytes()
+	local floor_room = MIN_CLIENT_BUFFERED_BYTES - peer.bytes
+	return math.max(0, math.min(share - peer.bytes, math.max(global_room, floor_room)))
 end
 
 local MAX_DATAGRAM_SIZE = 1200
@@ -154,14 +191,23 @@ local function decode_message(raw)
 	return nil, "unknown message kind"
 end
 
-function M.reset_client(client)
+function udp_events.reset_client(client)
 	if not client then
 		return
 	end
 
 	if client.udp_reliable then
+		reliable_udp.release(client.udp_reliable)
 		peers[client.udp_reliable] = nil
+		peer_count = peer_count - 1
 	end
+	if client.udp_token_index and client.udp_token then
+		client.udp_token_index[client.udp_token] = nil
+	end
+	client.udp_token_index = nil
+	client.udp_inbox = nil
+	client.udp_pending_messages = nil
+	client.udp_over_since = nil
 	client.udp_reliable = nil
 	client.udp_send_queue = {}
 	client.udp_pending_ack_order = {}
@@ -171,49 +217,104 @@ function M.reset_client(client)
 	client.udp_token = nil
 end
 
-function M.binary(bytes)
+function udp_events.set_token(state, connection, client, token)
+	if client.udp_token_index and client.udp_token then
+		client.udp_token_index[client.udp_token] = nil
+	end
+	state.clients_by_token[token] = connection
+	client.udp_token_index = state.clients_by_token
+	client.udp_token = token
+end
+
+local function endpoint_key(address, port)
+	local normalized_port = normalize_port(port)
+	if not normalized_port then
+		return nil
+	end
+	return tostring(address) .. ":" .. normalized_port
+end
+
+function udp_events.unbind_endpoint(client)
+	if client and client.udp_endpoint_index and client.udp_endpoint_key then
+		local index = client.udp_endpoint_index
+		if index[client.udp_endpoint_key] == client.udp_endpoint_connection then
+			index[client.udp_endpoint_key] = nil
+		end
+	end
+	if client then
+		client.udp_endpoint_index = nil
+		client.udp_endpoint_key = nil
+		client.udp_endpoint_connection = nil
+	end
+end
+
+-- call once the game endpoint is bound to a player
+function udp_events.bind_endpoint(state, connection, client)
+	udp_events.unbind_endpoint(client)
+	local key = endpoint_key(client.game_address, client.game_port)
+	if not key then
+		return
+	end
+	state.clients_by_endpoint[key] = connection
+	client.udp_endpoint_index = state.clients_by_endpoint
+	client.udp_endpoint_key = key
+	client.udp_endpoint_connection = connection
+end
+
+-- drops a client's index entries and buffered bytes
+function udp_events.remove_client(client)
+	udp_events.unbind_endpoint(client)
+	udp_events.reset_client(client)
+end
+
+function udp_events.binary(bytes)
 	return event_codec.blob(bytes)
 end
 
-function M.hash_event_name(name)
+function udp_events.hash_event_name(name)
 	return event_codec.hash_name(name)
 end
 
-function M.format_event_hash(value)
+function udp_events.format_event_hash(value)
 	return event_codec.hex(value)
 end
 
-function M.encode_reliable_event(event_hash, message_id, payload_bytes)
+function udp_events.encode_reliable_event(event_hash, message_id, payload_bytes)
 	return encode_event_like_message(KIND_RELIABLE_EVENT, event_hash, message_id, payload_bytes)
 end
 
-function M.encode_reliable_result(event_hash, message_id, payload_bytes)
+function udp_events.encode_reliable_result(event_hash, message_id, payload_bytes)
 	return encode_result_message(event_hash, message_id, payload_bytes)
 end
 
-function M.enqueue(client, encoded_message)
+function udp_events.enqueue(client, encoded_message)
 	if not client or type(encoded_message) ~= "string" or #encoded_message < 18 then
 		return false
 	end
 	local kind, flags, _, id = string.unpack(">BBc8I4", encoded_message)
-	if flags ~= 0 or buffered_bytes() + #encoded_message > 16 * 1024 * 1024 then
+	if flags ~= 0 then
 		return false
 	end
-	return reliable_udp.enqueue(get_peer(client), kind, id, encoded_message)
+	local peer = get_peer(client)
+	if #encoded_message > client_available_bytes(peer) then
+		return false
+	end
+	return reliable_udp.enqueue(peer, kind, id, encoded_message)
 end
 
-function M.enqueue_latest(client, encoded_message)
+function udp_events.enqueue_latest(client, encoded_message)
 	if not client or type(encoded_message) ~= "string" or #encoded_message < 18 then return false end
 	local _, _, _, id = string.unpack(">BBc8I4", encoded_message)
-	if buffered_bytes() + #encoded_message > 16 * 1024 * 1024 then return false end
-	return reliable_udp.enqueue_latest(get_peer(client), id, encoded_message)
+	local peer = get_peer(client)
+	if #encoded_message > client_available_bytes(peer) then return false end
+	return reliable_udp.enqueue_latest(peer, id, encoded_message)
 end
 
-function M.accept(client, message)
+function udp_events.accept(client, message)
 	return reliable_udp.accept(get_peer(client), message.kind, message.message_id)
 end
 
-function M.tick(client, config)
+function udp_events.tick(client, config)
 	local peer = get_peer(client)
 	if config then
 		peer.retry_base = (config.eventRetryBaseTicks or 20) / 60
@@ -223,97 +324,189 @@ function M.tick(client, config)
 	return peer.error
 end
 
-function M.new_token()
-	local native = rawget(_G, "srcIntegrationNative")
-	if type(native) ~= "table" or type(native.randomToken) ~= "function" then
-		return nil
-	end
-
-	local ok, token = pcall(native.randomToken)
-	if not ok or type(token) ~= "string" or #token ~= 32 then
+function udp_events.new_token()
+	local token = srcIntegrationNative.randomToken()
+	if type(token) ~= "string" or #token ~= 32 then
 		return nil
 	end
 	return token
 end
 
 local function find_client_for_game_endpoint(state, address, port)
-	if not state or type(state.clients) ~= "table" then
-		return nil, nil
+	local index = state and state.clients_by_endpoint
+	local key = index and endpoint_key(address, port)
+	local connection = key and index[key]
+	local client = connection and state.clients[connection]
+	if client and client.bound then
+		return connection, client
 	end
-
-	local normalized_address = tostring(address)
-	local normalized_port = normalize_port(port)
-	for connection, client in pairs(state.clients) do
-		local player = client and client.player or nil
-		local player_connection = player and player.connection or nil
-		if player_connection
-			and tostring(player_connection.address) == normalized_address
-			and normalize_port(player_connection.port) == normalized_port then
-			return connection, client
-		end
-	end
-
 	return nil, nil
+end
+
+-- game endpoint belongs to a bound client with an open TCP connection
+function udp_events.has_bound_client(state, address, port)
+	local connection = find_client_for_game_endpoint(state, address, port)
+	return connection ~= nil and connection.is_open == true
 end
 
 local function find_client_for_datagram(state, token, address)
-	if type(state) ~= "table" or type(state.clients) ~= "table" then
-		return nil, nil
-	end
-
-	for connection, client in pairs(state.clients) do
-		if client
-			and client.udp_token == token
-			and tostring(connection.address) == tostring(address)
-		then
-			return connection, client
-		end
+	local index = state and state.clients_by_token
+	local connection = index and index[token]
+	local client = connection and state.clients[connection]
+	if client and client.udp_token == token and tostring(connection.address) == tostring(address) then
+		return connection, client
 	end
 	return nil, nil
 end
 
-function M.on_send_packet(state, address, port)
+function udp_events.on_send_packet(state, address, port)
 	local _, client = find_client_for_game_endpoint(state, address, port)
-	local native = rawget(_G, "srcIntegrationNative")
-	if not client or client.udp_events_ready ~= true or type(native) ~= "table"
-		or type(native.sendPacket) ~= "function" then
-			return
-		end
-	M.tick(client, state.config)
+	if not client or client.udp_events_ready ~= true then
+		return
+	end
+	udp_events.tick(client, state.config)
 	for _ = 1, MAX_FLUSH_DATAGRAMS do
 		local packet = reliable_udp.next(get_peer(client))
 		if not packet then break end
 		local datagram, encode_error = build_datagram(client.udp_token, packet)
 		if not datagram then
-			log.warn("failed to build UDP datagram: %s", tostring(encode_error))
+			udp_events.warn_limited(client, "udp_build_failed", "failed to build UDP datagram: %s", tostring(encode_error))
 			break
 		end
-		local ok, sent = pcall(native.sendPacket, tostring(address), normalize_port(port), datagram)
-		if not ok or sent ~= #datagram then
-			log.warn("UDP send attempt failed: %s", tostring(sent))
+		local sent = srcIntegrationNative.sendPacket(tostring(address), normalize_port(port), datagram)
+		if sent ~= #datagram then
+			udp_events.warn_limited(client, "udp_send_failed", "UDP send attempt failed: %s", tostring(sent))
 			break
 		end
 	end
 end
 
-function M.on_packet_receive(state)
-	local native = rawget(_G, "srcIntegrationNative")
-	if type(native) ~= "table" or type(native.drainSrcPackets) ~= "function" then
-		return {}, false
+local malformed_datagram_warnings = {}
+
+local function refill(client, now)
+	local rate = client.udp_rate
+	if not rate then
+		client.udp_rate = { datagrams = DATAGRAM_BURST, events = EVENT_BURST, at = now, }
+		return client.udp_rate
+	end
+	local elapsed = math.max(0, now - rate.at)
+	rate.at = now
+	rate.datagrams = math.min(DATAGRAM_BURST, rate.datagrams + elapsed * DATAGRAM_RATE)
+	rate.events = math.min(EVENT_BURST, rate.events + elapsed * EVENT_RATE)
+	return rate
+end
+
+-- returns the decoded entry or nil
+local function process_datagram(state, connection, client, entry, rate)
+	local token, address, port, batch = client.udp_token, entry.address, entry.port, entry.batch
+	if not token then
+		return nil -- The session was reset after this datagram was queued.
+	end
+	if batch == EMPTY_BATCH then
+		local reply = build_datagram(token, EMPTY_BATCH)
+		srcIntegrationNative.sendPacket(address, port, reply)
+		return nil
+	end
+	if not client.bound or not client.udp_events_ready then
+		return nil
+	end
+	udp_events.tick(client, state.config)
+	local peer = get_peer(client)
+	local messages = {}
+	local pending = client.udp_pending_messages
+	for _, delivery in ipairs(reliable_udp.receive(peer, batch, client_available_bytes(peer))) do
+		local message, decode_error = decode_message(delivery.bytes)
+		if not message or message.kind ~= delivery.kind or message.message_id ~= delivery.id
+			or #delivery.bytes - 18 > math.min(262144, state.config.maxEventBytes) then
+			peer.error = decode_error or "invalid reassembled UDP event"
+			break
+		end
+		message.latest = delivery.latest
+		if (pending and #pending > 0) or rate.events < 1 then
+			pending = pending or {}
+			pending[#pending + 1] = message
+			client.udp_pending_messages = pending
+			if #pending > MAX_PENDING_MESSAGES then
+				peer.error = "UDP event backlog exceeded"
+				break
+			end
+		else
+			rate.events = rate.events - 1
+			messages[#messages + 1] = message
+		end
+	end
+	for _, receipt in ipairs(reliable_udp.take_receipts(peer)) do
+		messages[#messages + 1] = { kind = 2, message_ids = { receipt.id, }, }
+	end
+	if peer.error then
+		udp_events.warn_limited(client, "udp_transport_failed", "UDP transport failed: %s", peer.error)
+		connection:close()
+		return nil
+	end
+	return { connection = connection, client = client, messages = messages, }
+end
+
+-- defers work over the token buckets, disconnects sustained overload
+local function service_client(state, connection, client, now, decoded)
+	local rate = refill(client, now)
+	local inbox = client.udp_inbox
+	local pending = client.udp_pending_messages
+	if pending and #pending > 0 then
+		local released = {}
+		while #pending > 0 and rate.events >= 1 do
+			rate.events = rate.events - 1
+			released[#released + 1] = table.remove(pending, 1)
+		end
+		if #released > 0 then
+			decoded[#decoded + 1] = { connection = connection, client = client, messages = released, }
+		end
+	end
+	while inbox and #inbox > 0 and rate.datagrams >= 1 and connection.is_open do
+		rate.datagrams = rate.datagrams - 1
+		local entry = table.remove(inbox, 1)
+		local result = process_datagram(state, connection, client, entry, rate)
+		if result then
+			decoded[#decoded + 1] = result
+		end
 	end
 
-	local ok, drained_or_err = pcall(native.drainSrcPackets)
+	pending = client.udp_pending_messages
+	local backlog = (inbox and #inbox > 0) or (pending and #pending > 0)
+	if not backlog or not connection.is_open then
+		client.udp_over_since = nil
+		state.udp_backlog[connection] = nil
+		return
+	end
+	state.udp_backlog[connection] = client
+	client.udp_over_since = client.udp_over_since or now
+	if now - client.udp_over_since >= OVER_LIMIT_DISCONNECT_SECONDS then
+		udp_events.warn_limited(
+			client,
+			"udp_rate_limit",
+			"disconnecting %s: inbound UDP over rate limit for %ds (datagrams %d/s, events %d/s)",
+			tostring(connection.address),
+			OVER_LIMIT_DISCONNECT_SECONDS,
+			DATAGRAM_RATE,
+			EVENT_RATE
+		)
+		connection:close()
+	end
+end
+
+function udp_events.on_packet_receive(state)
+	local ok, drained_or_err = pcall(srcIntegrationNative.drainSrcPackets)
 	if not ok or type(drained_or_err) ~= "table" then
 		log.warn("standalone UDP drain failed: %s", tostring(drained_or_err))
 		return {}, false
 	end
 
-	local decoded = {}
+	local now = os.realClock()
+	local touched = {}
 	for _, packet in ipairs(drained_or_err.packets or {}) do
 		repeat
 			local token, batch, datagram_err = parse_datagram(packet.data)
 			if not token then
-				log.warn("invalid standalone UDP datagram: %s", tostring(datagram_err))
+				log.warn_limited(malformed_datagram_warnings, "invalid_datagram", "invalid standalone UDP datagram: %s", tostring(datagram_err))
 				break
 			end
 
@@ -330,44 +523,31 @@ function M.on_packet_receive(state)
 			client.game_address = address
 			client.game_port = port
 
-			if batch == EMPTY_BATCH then
-				local reply = build_datagram(token, EMPTY_BATCH)
-				if type(native.sendPacket) == "function" then
-					pcall(native.sendPacket, address, port, reply)
-				end
-				break
+			local inbox = client.udp_inbox
+			if not inbox then
+				inbox = {}
+				client.udp_inbox = inbox
 			end
-			if not client.bound or not client.udp_events_ready then
-				break
+			if #inbox >= MAX_INBOX_DATAGRAMS then
+				-- reliable transfers retransmit, the overload check handles the sender
+				udp_events.warn_limited(client, "udp_inbox_full", "dropping UDP datagram from %s: inbound queue full", address)
+			else
+				inbox[#inbox + 1] = { address = address, port = port, batch = batch, }
 			end
-			M.tick(client, state.config)
-			local peer = get_peer(client)
-			local messages = {}
-			for _, delivery in ipairs(reliable_udp.receive(peer, batch, math.max(0, 16 * 1024 * 1024 - buffered_bytes()))) do
-				local message, decode_error = decode_message(delivery.bytes)
-				if not message or message.kind ~= delivery.kind or message.message_id ~= delivery.id
-					or #delivery.bytes - 18 > math.min(262144, state.config.maxEventBytes) then
-					peer.error = decode_error or "invalid reassembled UDP event"
-					break
-				end
-				message.latest = delivery.latest
-				messages[#messages + 1] = message
-			end
-			for _, receipt in ipairs(reliable_udp.take_receipts(peer)) do
-				messages[#messages + 1] = { kind = 2, message_ids = { receipt.id, }, }
-			end
-			if peer.error then
-				log.warn("UDP transport failed: %s", peer.error)
-				connection:close()
-				break
-			end
-
-			decoded[#decoded + 1] = {
-				connection = connection,
-				client = client,
-				messages = messages,
-			}
+			touched[connection] = client
 		until true
+	end
+
+	local decoded = {}
+	local serviced = {}
+	for connection, client in pairs(state.udp_backlog) do
+		serviced[connection] = true
+		service_client(state, connection, client, now, decoded)
+	end
+	for connection, client in pairs(touched) do
+		if not serviced[connection] then
+			service_client(state, connection, client, now, decoded)
+		end
 	end
 
 	local should_override = (tonumber(drained_or_err.drained) or 0) > 0
@@ -375,4 +555,4 @@ function M.on_packet_receive(state)
 	return decoded, should_override
 end
 
-return M
+return udp_events

@@ -1,4 +1,7 @@
 -- Run from rs_integration: lua test/tests/world_mutations.lua
+-- disabled with world-mutation sync, remove the next two lines to restore
+print("world_mutations: SKIPPED (feature disabled)")
+os.exit(0)
 local world_mutations = require("main.src.world_mutations")
 local hooks = {}
 local events = {}

@@ -1,4 +1,6 @@
-local M = {}
+local utf8_sanitize = require("main.src.utf8_sanitize")
+
+local sync_paths = {}
 
 local PROTECTED_TEXTURE_FILES = {
 	["texture/box.png"] = true,
@@ -49,19 +51,19 @@ local PROTECTED_TEXTURE_FILES = {
 	["texture/title.png"] = true,
 }
 
-function M.join(first, second)
+function sync_paths.join(first, second)
 	if first:sub(-1) == "/" then
 		return first .. second
 	end
 	return first .. "/" .. second
 end
 
-function M.scripts_root(runtime_config)
-	return M.join(runtime_config.clientRoot, "scripts")
+function sync_paths.scripts_root(runtime_config)
+	return sync_paths.join(runtime_config.clientRoot, "scripts")
 end
 
-function M.assets_root(runtime_config)
-	return M.join(runtime_config.clientRoot, "assets")
+function sync_paths.assets_root(runtime_config)
+	return sync_paths.join(runtime_config.clientRoot, "assets")
 end
 
 -- Resolve before reading so an owner cannot import another tree through symlinks.
@@ -79,11 +81,11 @@ if ok then
 	end
 end
 
-function M.exists(path)
+function sync_paths.exists(path)
 	return realpath ~= nil and realpath(path) ~= nil
 end
 
-function M.is_contained(root, path)
+function sync_paths.is_contained(root, path)
 	if not realpath or type(root) ~= "string" or type(path) ~= "string" then return false end
 	root = root:gsub("/+$", "")
 	if path:sub(1, #root + 1) ~= root .. "/" then return false end
@@ -94,7 +96,7 @@ function M.is_contained(root, path)
 	return base ~= nil and resolved ~= nil and resolved == base .. "/" .. relative
 end
 
-function M.read_file(path, max_bytes)
+function sync_paths.read_file(path, max_bytes)
 	local file = io.open(path, "rb")
 	if not file then
 		return nil
@@ -125,7 +127,19 @@ function M.read_file(path, max_bytes)
 	return table.concat(chunks)
 end
 
-function M.extension(name)
+-- nil when the file can't be opened
+function sync_paths.file_size(path)
+	local file = io.open(path, "rb")
+	if not file then
+		return nil
+	end
+	local size, seek_error = file:seek("end")
+	file:close()
+	assert(size, "Cannot size sync file: " .. path .. ": " .. tostring(seek_error))
+	return size
+end
+
+function sync_paths.extension(name)
 	if type(name) ~= "string" then
 		return ""
 	end
@@ -138,36 +152,63 @@ function M.extension(name)
 	return name:sub(dot):lower()
 end
 
-function M.is_lua(path)
+function sync_paths.is_lua(path)
 	return type(path) == "string" and path:sub(-4):lower() == ".lua"
 end
 
-local function is_relative(path)
-	return type(path) == "string"
-		and path ~= ""
-		and not path:find("\\", 1, true)
-		and path:sub(1, 1) ~= "/"
-		and not path:find("..", 1, true)
-		and not path:find(":", 1, true)
-		and not path:find("%c")
-		and not path:find("//", 1, true)
+local RESERVED_DEVICE_NAMES = { con = true, prn = true, aux = true, nul = true, ["conin$"] = true, ["conout$"] = true }
+
+local function is_reserved_device_component(component)
+	local stem = component:match("^([^.]*)"):gsub(" +$", ""):lower()
+	if RESERVED_DEVICE_NAMES[stem] then return true end
+	return stem:match("^com%d$") ~= nil or stem:match("^lpt%d$") ~= nil
 end
 
-function M.is_safe_script(path)
+-- same rules as the client's PathSafety::isSafeRelativePath
+local function is_relative(path)
+	if type(path) ~= "string" or path == "" or #path > 1024
+		or path:find("[%c\\:<>\"|?*]") then
+		return false
+	end
+	-- paths are echoed back, so repairing bytes would break lookup
+	if not utf8_sanitize.is_valid(path) then
+		return false
+	end
+	for component in (path .. "/"):gmatch("([^/]*)/") do
+		if component == "" or component == "." or component == ".."
+			or component:find("[%. ]$") or is_reserved_device_component(component) then
+			return false
+		end
+	end
+	return true
+end
+
+sync_paths.is_safe_relative = is_relative
+
+-- non-UTF-8 name that would sync if valid, so the scan can report it
+function sync_paths.is_invalid_utf8_syncable_name(name)
+	if type(name) ~= "string" or utf8_sanitize.is_valid(name) then
+		return false
+	end
+	local repaired = utf8_sanitize.sanitize(name)
+	return sync_paths.is_safe_script(repaired) or sync_paths.is_safe_asset(repaired)
+end
+
+function sync_paths.is_safe_script(path)
 	if not is_relative(path) then
 		return false
 	end
 
-	local extension = M.extension(path)
+	local extension = sync_paths.extension(path)
 	return extension == ".lua" or extension == ".yml" or extension == ".yaml" or extension == ".json"
 end
 
-function M.is_safe_asset(path)
+function sync_paths.is_safe_asset(path)
 	if not is_relative(path) then
 		return false
 	end
 
-	local extension = M.extension(path)
+	local extension = sync_paths.extension(path)
 	local is_supported = extension == ".csx"
 		or extension == ".sbc"
 		or extension == ".sbl"
@@ -185,4 +226,4 @@ function M.is_safe_asset(path)
 	return PROTECTED_TEXTURE_FILES[string.lower(path)] ~= true
 end
 
-return M
+return sync_paths

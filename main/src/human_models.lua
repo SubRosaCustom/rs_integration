@@ -1,7 +1,7 @@
 local log = require("main.src.log")
-local network = require("main.src.network")
+local network_sync_payload = require("main.src.network_sync_payload")
 
-local M = {}
+local human_models = {}
 
 local MIN_CUSTOM_HUMAN_MODEL_INDEX = 0
 local MAX_CUSTOM_HUMAN_MODEL_INDEX = 29
@@ -66,12 +66,10 @@ local function normalize_assignment(def)
 	}
 end
 
-function M.install(state, src, force)
-	if state.human_models_api_installed and state.human_accessories_api_installed and not force then
+function human_models.install(state, src)
+	if state.human_models_api_installed and state.human_accessories_api_installed then
 		return
 	end
-	state.human_necktie_assignments = state.human_necktie_assignments or {}
-	state.human_necklace_assignments = state.human_necklace_assignments or {}
 
 	src.registerHumanModel = function(index, def)
 		local normalized_index = normalize_index(index)
@@ -90,7 +88,7 @@ function M.install(state, src, force)
 		)
 
 		state.human_model_assignments[normalized_index] = assignment
-		local sent = network.send_human_model(state, nil, normalized_index, assignment)
+		local sent = network_sync_payload.send_human_model(state, nil, normalized_index, assignment)
 		if sent == false then
 			log.warn("failed queuing human model sync for index %d", normalized_index)
 		end
@@ -127,7 +125,7 @@ function M.install(state, src, force)
 			MIN_CUSTOM_NECKTIE_INDEX,
 			MAX_CUSTOM_NECKTIE_INDEX,
 			state.human_necktie_assignments,
-			network.send_human_necktie,
+			network_sync_payload.send_human_necktie,
 			"src.registerHumanNecktie"
 		)
 	end
@@ -139,7 +137,7 @@ function M.install(state, src, force)
 			MIN_CUSTOM_NECKLACE_INDEX,
 			MAX_CUSTOM_NECKLACE_INDEX,
 			state.human_necklace_assignments,
-			network.send_human_necklace,
+			network_sync_payload.send_human_necklace,
 			"src.registerHumanNecklace"
 		)
 	end
@@ -149,4 +147,4 @@ function M.install(state, src, force)
 	log.info("human model registry API installed")
 end
 
-return M
+return human_models

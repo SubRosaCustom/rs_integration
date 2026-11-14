@@ -1,6 +1,7 @@
 local protocol = require("main.src.protocol")
+local udp_events = require("main.src.udp_events")
 
-local M = {}
+local browser_marker = {}
 
 local PACKET_SIZE_ADDRESS = 0x39075C7C
 local PACKET_BIT_OFFSET_ADDRESS = 0x39075C80
@@ -9,44 +10,8 @@ local MAX_PACKET_SIZE = 0x10000
 local MARKER = "SRCE"
 local BASE_ADDRESS = memory.getBaseAddress()
 
-local function normalize_port(port)
-	local number_port = tonumber(port)
-	if not number_port then
-		return nil
-	end
-	number_port = math.floor(number_port)
-	if number_port < 0 or number_port > 65535 then
-		return nil
-	end
-	return number_port
-end
-
-local function endpoint_has_src_client(state, address, port)
-	if type(state) ~= "table" or type(state.clients) ~= "table" then
-		return false
-	end
-
-	local normalized_address = tostring(address)
-	local normalized_port = normalize_port(port)
-	if not normalized_port then
-		return false
-	end
-
-	for connection, _ in pairs(state.clients) do
-		if connection
-			and connection.is_open
-			and tostring(connection.address) == normalized_address
-			and normalize_port(connection.port) == normalized_port then
-			return true
-		end
-	end
-
-	return false
-end
-
-function M.on_send_packet(state, address, port)
-	local has_src_client = endpoint_has_src_client(state, address, port)
-	if has_src_client then
+function browser_marker.on_send_packet(state, address, port)
+	if udp_events.has_bound_client(state, address, port) then
 		return
 	end
 
@@ -84,7 +49,6 @@ function M.on_send_packet(state, address, port)
 		memory.writeInt(BASE_ADDRESS + PACKET_BIT_OFFSET_ADDRESS, 0)
 	end
 
-	state.browser_marker_mutation_stack = state.browser_marker_mutation_stack or {}
 	state.browser_marker_mutation_stack[#state.browser_marker_mutation_stack + 1] = {
 		original_size = packet_size,
 		original_bit_offset = packet_bit_offset,
@@ -93,7 +57,7 @@ function M.on_send_packet(state, address, port)
 	}
 end
 
-function M.on_post_send_packet(state)
+function browser_marker.on_post_send_packet(state)
 	if type(state) ~= "table" or type(state.browser_marker_mutation_stack) ~= "table" then
 		return
 	end
@@ -108,4 +72,4 @@ function M.on_post_send_packet(state)
 	memory.writeInt(BASE_ADDRESS + PACKET_BIT_OFFSET_ADDRESS, mutation.original_bit_offset or 0)
 end
 
-return M
+return browser_marker

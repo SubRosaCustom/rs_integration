@@ -1,5 +1,5 @@
-local M = {
-	VERSION = 10,
+local protocol = {
+	VERSION = 11,
 }
 
-return M
+return protocol

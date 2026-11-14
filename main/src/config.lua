@@ -1,6 +1,7 @@
 local log = require("main.src.log")
+local sync_paths = require("main.src.sync_paths")
 
-local M = {}
+local config = {}
 
 local BASE64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 
@@ -45,7 +46,7 @@ local function load_motd_icon(path)
 	return encode_base64(bytes)
 end
 
-M.DEFAULTS = {
+config.DEFAULTS = {
 	enabled = true,
 	disallowNonSRCPlayers = false,
 	disableClientTiremarks = false,
@@ -71,7 +72,7 @@ M.DEFAULTS = {
 
 local function copy_defaults()
 	local copy = {}
-	for key, value in pairs(M.DEFAULTS) do
+	for key, value in pairs(config.DEFAULTS) do
 		copy[key] = type(value) == "table" and {} or value
 	end
 	return copy
@@ -90,7 +91,7 @@ local function normalize_number(value, fallback, minimum)
 	return number
 end
 
-function M.resolve(raw)
+function config.resolve(raw)
 	local resolved = copy_defaults()
 	if type(raw) ~= "table" then
 		return resolved
@@ -116,13 +117,8 @@ function M.resolve(raw)
 			count = count + 1
 			assert(type(index) == "number" and index % 1 == 0 and index >= 1 and index <= #raw.disallowedPaths,
 				"config.src.disallowedPaths must be a dense list")
-			assert(type(path) == "string" and #path > 0 and #path <= 255 and not path:find("[\\:%z\1-\31\127]")
-				and path:sub(1, 1) ~= "/" and path:sub(-1) ~= "/" and not path:find("//", 1, true),
+			assert(type(path) == "string" and #path <= 255 and sync_paths.is_safe_relative(path),
 				"invalid resource pack policy path")
-			for part in path:gmatch("[^/]+") do
-				assert(part ~= "." and part ~= ".." and part:sub(-1) ~= "." and part:sub(-1) ~= " ",
-					"invalid resource pack policy path: " .. path)
-			end
 			if not seen[path] then
 				seen[path] = true
 				resolved.disallowedPaths[#resolved.disallowedPaths + 1] = path
@@ -180,8 +176,8 @@ function M.resolve(raw)
 	return resolved
 end
 
-function M.copy_defaults()
+function config.copy_defaults()
 	return copy_defaults()
 end
 
-return M
+return config

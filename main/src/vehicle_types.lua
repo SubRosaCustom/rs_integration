@@ -1,6 +1,6 @@
 local log = require("main.src.log")
 
-local M = {}
+local vehicle_types = {}
 
 local PROTOCOL_VERSION = 2
 local MAX_VEHICLE_TYPE_COUNT = 128
@@ -49,30 +49,6 @@ local function normalize_index(index, minimum, maximum)
 	return index
 end
 
-local function has_memory_api()
-	return type(memory) == "table"
-		and type(memory.getAddress) == "function"
-		and type(memory.readFloat) == "function"
-		and type(memory.writeFloat) == "function"
-		and type(memory.readInt) == "function"
-		and type(memory.writeInt) == "function"
-		and type(memory.writeBytes) == "function"
-end
-
-local function get_native_vehicle_type_api()
-	if type(srcIntegrationNative) ~= "table" then
-		return nil
-	end
-
-	if type(srcIntegrationNative.loadSBV) ~= "function"
-		or type(srcIntegrationNative.setupVehicleTypeNew) ~= "function"
-		or type(srcIntegrationNative.setupObjectTypeWeight) ~= "function" then
-		return nil
-	end
-
-	return srcIntegrationNative
-end
-
 local function is_vehicle_type_userdata(value)
 	return type(value) == "userdata" and safe_read(value, "class") == "VehicleType"
 end
@@ -106,10 +82,6 @@ local function get_vehicle_type_index(ref)
 end
 
 local function get_vehicle_type_address(vehicle_type)
-	if not has_memory_api() then
-		return nil, "memory api unavailable"
-	end
-
 	local address_ok, address = pcall(memory.getAddress, vehicle_type)
 	if not address_ok or type(address) ~= "number" or address <= 0 then
 		return nil, "failed to resolve vehicle type address"
@@ -119,10 +91,6 @@ local function get_vehicle_type_address(vehicle_type)
 end
 
 local function get_vehicle_type_slot_address(index)
-	if not has_memory_api() then
-		return nil
-	end
-
 	local normalized = normalize_index(index, 0, MAX_VEHICLE_TYPE_INDEX)
 	if normalized == nil then
 		return nil
@@ -137,19 +105,7 @@ local function clear_vehicle_type_slot(address)
 end
 
 local function clear_custom_vehicle_type_slots()
-	local native_api = get_native_vehicle_type_api()
-	if native_api and type(native_api.clearCustomVehicleTypeSlots) == "function" then
-		native_api.clearCustomVehicleTypeSlots()
-		return
-	end
-
-	if not has_memory_api() then
-		return
-	end
-
-	for index = FIRST_CUSTOM_INDEX, MAX_VEHICLE_TYPE_INDEX do
-		clear_vehicle_type_slot(memory.getBaseAddress() + SERVER_VEHICLE_TYPES_OFFSET + (index * VEHICLE_TYPE_SIZE))
-	end
+	srcIntegrationNative.clearCustomVehicleTypeSlots()
 end
 
 local function normalize_seat_vector(value)
@@ -218,7 +174,7 @@ local function resolve_vehicle_type(ref)
 		return get_vehicle_type_by_index(ref)
 	end
 
-	if type(ref) == "string" and ref ~= "" and type(vehicleTypes.getByName) == "function" then
+	if type(ref) == "string" and ref ~= "" then
 		local ok, vehicle_type = pcall(vehicleTypes.getByName, ref)
 		if ok then
 			return vehicle_type
@@ -358,14 +314,11 @@ local function write_definition_to_vehicle_type(target_type, definition)
 end
 
 local function finalize_vehicle_type_definition(target_type, definition, address)
-	local native_api = get_native_vehicle_type_api()
-	assert(native_api ~= nil, "vehicleTypes.new: srcIntegrationNative vehicle helpers unavailable")
-
 	local target_index = get_vehicle_type_index(target_type)
 	assert(target_index ~= nil, "vehicleTypes.new: failed to resolve target vehicle type index")
 
-	native_api.loadSBV(target_index, definition.model)
-	native_api.setupVehicleTypeNew(
+	srcIntegrationNative.loadSBV(target_index, definition.model)
+	srcIntegrationNative.setupVehicleTypeNew(
 		target_index,
 		DEFAULT_INITIAL_WHEEL_FLAGS,
 		definition.wheelRadius,
@@ -373,10 +326,10 @@ local function finalize_vehicle_type_definition(target_type, definition, address
 	)
 	memory.writeInt(address + OFFSET_NUM_SEATS, definition.numSeats)
 	write_seat_positions(address, definition.seatPos)
-	native_api.setupObjectTypeWeight(target_index)
+	srcIntegrationNative.setupObjectTypeWeight(target_index)
 end
 
-function M.build_sync_payload(state)
+function vehicle_types.build_sync_payload(state)
 	local entries = {}
 	for _, entry in pairs(state.custom_vehicle_types_by_index or {}) do
 		if type(entry) == "table" then
@@ -409,14 +362,13 @@ local function emit_sync_payload(src, payload, player)
 end
 
 local function broadcast_custom_vehicle_types(state, src)
-	local payload = M.build_sync_payload(state)
+	local payload = vehicle_types.build_sync_payload(state)
 	if payload then
 		emit_sync_payload(src, payload, nil)
 	end
 end
 
 local function record_definition(state, definition, source_index)
-	state.custom_vehicle_types_by_index = state.custom_vehicle_types_by_index or {}
 	state.custom_vehicle_types_by_index[definition.index] = {
 		index = definition.index,
 		sourceIndex = source_index or -1,
@@ -466,9 +418,9 @@ local function construct_vehicle_type(state, src, definition, source_index)
 	record_definition(state, definition, source_index)
 	broadcast_custom_vehicle_types(state, src)
 
-	local network = require("main.src.network")
-	network.send_vehicle_type_model(state, nil, target_index, definition.model)
-	network.send_vehicle_type_audio(state, nil, target_index, definition.audio)
+	local network_sync_payload = require("main.src.network_sync_payload")
+	network_sync_payload.send_vehicle_type_model(state, nil, target_index, definition.model)
+	network_sync_payload.send_vehicle_type_audio(state, nil, target_index, definition.audio)
 
 	return target_type
 end
@@ -548,9 +500,9 @@ local function run_init_vehicle_type_hook(state, src)
 	broadcast_custom_vehicle_types(state, src)
 end
 
-function M.install(state, src, force)
+function vehicle_types.install(state, src)
 	local was_installed = state.vehicle_types_api_installed
-	if was_installed and not force then
+	if was_installed then
 		return
 	end
 
@@ -559,10 +511,6 @@ function M.install(state, src, force)
 		return
 	end
 
-	state.custom_vehicle_types_by_index = state.custom_vehicle_types_by_index or {}
-	state.next_custom_vehicle_type_index = state.next_custom_vehicle_type_index or FIRST_CUSTOM_INDEX
-	state.vehicle_type_model_assignments = state.vehicle_type_model_assignments or {}
-	state.vehicle_type_audio_assignments = state.vehicle_type_audio_assignments or {}
 	if not was_installed then
 		clear_custom_vehicle_type_slots()
 	end
@@ -578,9 +526,9 @@ function M.install(state, src, force)
 	end
 
 	if type(src) == "table" then
-		if force or type(src.syncCustomVehicleTypes) ~= "function" then
+		if type(src.syncCustomVehicleTypes) ~= "function" then
 			src.syncCustomVehicleTypes = function(player)
-				local payload = M.build_sync_payload(state)
+				local payload = vehicle_types.build_sync_payload(state)
 				if not payload then
 					return false
 				end
@@ -588,7 +536,7 @@ function M.install(state, src, force)
 			end
 		end
 
-		if force or type(src.setVehicleTypeModel) ~= "function" then
+		if type(src.setVehicleTypeModel) ~= "function" then
 			src.setVehicleTypeModel = function(index_or_type, model_name, player)
 				local target_index = get_vehicle_type_index(index_or_type)
 				assert(type(target_index) == "number",
@@ -607,12 +555,12 @@ function M.install(state, src, force)
 					entry.model = normalized_model
 				end
 
-				local network = require("main.src.network")
-				return network.send_vehicle_type_model(state, player, target_index, normalized_model)
+				local network_sync_payload = require("main.src.network_sync_payload")
+				return network_sync_payload.send_vehicle_type_model(state, player, target_index, normalized_model)
 			end
 		end
 
-		if force or type(src.setVehicleTypeAudio) ~= "function" then
+		if type(src.setVehicleTypeAudio) ~= "function" then
 			src.setVehicleTypeAudio = function(index_or_type, audio_reference, player)
 				local target_index = get_vehicle_type_index(index_or_type)
 				assert(type(target_index) == "number",
@@ -631,34 +579,25 @@ function M.install(state, src, force)
 					entry.audio = normalized_audio
 				end
 
-				local network = require("main.src.network")
-				return network.send_vehicle_type_audio(state, player, target_index, normalized_audio)
+				local network_sync_payload = require("main.src.network_sync_payload")
+				return network_sync_payload.send_vehicle_type_audio(state, player, target_index, normalized_audio)
 			end
 		end
 	end
 
 	local function schedule_init_hook()
-		if type(hook) == "table" and type(hook.once) == "function" then
-			hook.once("Logic", function()
-				run_init_vehicle_type_hook(state, src)
-			end)
-			return
-		end
-
-		run_init_vehicle_type_hook(state, src)
-	end
-
-	if type(hook) == "table" and type(hook.add) == "function" then
-		hook.add("ConfigLoaded", "main.src.vehicleTypes.init", function()
-			schedule_init_hook()
+		hook.once("Logic", function()
+			run_init_vehicle_type_hook(state, src)
 		end)
-		schedule_init_hook()
-	else
-		run_init_vehicle_type_hook(state, src)
 	end
+
+	hook.add("ConfigLoaded", "main.src.vehicleTypes.init", function()
+		schedule_init_hook()
+	end)
+	schedule_init_hook()
 
 	state.vehicle_types_api_installed = true
 	log.info("vehicleTypes.new API installed")
 end
 
-return M
+return vehicle_types

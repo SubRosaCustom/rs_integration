@@ -1,11 +1,22 @@
--- Version: 0.9.9
+-- Version: 1.0.0
 ---@diagnostic disable: lowercase-global
-pcall(require, "librosaserver_src_integration")
+require("librosaserver_src_integration")
+
+for _, name in ipairs({
+	"loadITM", "loadIT3", "loadSBV", "clearCustomItemTypeSlots", "clearCustomVehicleTypeSlots",
+	"setupVehicleTypeNew", "setupObjectTypeWeight", "randomToken", "sendPacket",
+	"drainSrcPackets", "udpStats", "currentPacketEndpoint",
+}) do
+	assert(type(srcIntegrationNative) == "table" and type(srcIntegrationNative[name]) == "function",
+		"srcIntegrationNative." .. name .. " is missing; rs_utils library is outdated")
+end
 
 local log = require("main.src.log")
 local config_reader = require("main.src.config")
 local event_codec = require("main.src.event_codec")
 local network = require("main.src.network")
+local network_events = require("main.src.network_events")
+local network_sync_payload = require("main.src.network_sync_payload")
 local browser_marker = require("main.src.browser_marker")
 local human_models = require("main.src.human_models")
 local item_types = require("main.src.item_types")
@@ -13,22 +24,27 @@ local runtime_state = require("main.src.runtime_state")
 local client_scope = require("main.src.client_scope")
 local sync_snapshot = require("main.src.sync_snapshot")
 local vehicle_types = require("main.src.vehicle_types")
-local world_mutations = require("main.src.world_mutations")
 
-local state, was_legacy = runtime_state.get()
-state.src_admission_rejections = state.src_admission_rejections or {}
+local state = runtime_state.get()
 state.src_recovery_grace_until = os.realClock() + 60
 
 local src = _G.src or {}
 _G.src = src
 
-item_types.install(state, src, was_legacy)
-vehicle_types.install(state, src, was_legacy)
-human_models.install(state, src, was_legacy)
+item_types.install(state, src)
+vehicle_types.install(state, src)
+human_models.install(state, src)
 
-local function refresh_now()
+-- true if clients were notified; force is for non-manifest changes (config)
+local function refresh_now(force)
+	local previous_hash = state.manifest_hash
 	sync_snapshot.discover(state)
-	src.refresh()
+	if not force and previous_hash == state.manifest_hash then
+		log.info("sync refresh: no content changes")
+		return false
+	end
+	network.refresh(state)
+	return true
 end
 
 local function refresh_automatically()
@@ -74,7 +90,7 @@ local function apply_config(is_reload)
 		return
 	end
 
-	refresh_now()
+	refresh_now(true)
 	network.ensure_tcp_server(state)
 
 	if not state.runtime_active then
@@ -87,18 +103,23 @@ local function apply_config(is_reload)
 end
 
 function src.refresh()
-	network.refresh(state)
+	return refresh_now()
 end
 
 function src.refreshSyncFiles()
-	refresh_now()
+	return refresh_now()
 end
 
 function src.reloadClientPlugin(plugin_name)
 	assert(type(plugin_name) == "string" and plugin_name ~= "", "src.reloadClientPlugin(plugin_name): plugin_name must be non-empty string")
 	local previous_mode, previous_level = state.persistent_mode, state.loaded_level
-	local previous_plugins, previous_assets = state.client_plugin_signature, state.asset_files or {}
+	local previous_plugins, previous_assets = state.client_plugin_signature, state.asset_files
+	local previous_hash = state.manifest_hash
 	sync_snapshot.discover(state)
+	if previous_hash == state.manifest_hash then
+		log.info("client plugin reload: no content changes")
+		return false
+	end
 	local assets_changed = #previous_assets ~= #state.asset_files
 	if not assets_changed then
 		for i, entry in ipairs(previous_assets) do
@@ -115,13 +136,14 @@ function src.reloadClientPlugin(plugin_name)
 		plugin_name = nil
 	end
 	network.refresh(state, plugin_name)
+	return true
 end
 
 function src.onClientEvent(name, fn)
 	assert(type(name) == "string" and name ~= "", "src.onClientEvent(name, fn): name must be non-empty string")
 	assert(type(fn) == "function", "src.onClientEvent(name, fn): fn must be function")
 
-	return network.on_client_event(state, name, fn)
+	return network_events.on_client_event(state, name, fn)
 end
 
 local function emit_client_event(latest, player, name, ...)
@@ -136,10 +158,10 @@ local function emit_client_event(latest, player, name, ...)
 		error("src.emitClientEvent(player, name, ...): failed to hash event name")
 	end
 
-	local argument_bytes, encode_error = event_codec.encode_args(...)
+	local argument_bytes, encode_error = event_codec.encode(...)
 	assert(argument_bytes ~= nil, "src.emitClientEvent(player, name, ...): " .. tostring(encode_error))
 
-	return network.emit_client_event(state, player, name, hash, argument_bytes, latest)
+	return network_events.emit_client_event(state, player, name, hash, argument_bytes, latest)
 end
 
 function src.emitClientEvent(player, name, ...)
@@ -149,7 +171,7 @@ function src.emitClientEventLatest(player, name, ...)
 	return emit_client_event(true, player, name, ...)
 end
 
-world_mutations.install(state, src)
+-- DISABLED (world-mutation sync, see main/src/world_mutations.lua): world_mutations.install(state, src)
 
 function src.syncClientItemTypes(player, payload)
 	if player ~= nil then
@@ -157,7 +179,7 @@ function src.syncClientItemTypes(player, payload)
 		assert(not player.isBot, "src.syncClientItemTypes(player, payload): player cannot be a bot")
 	end
 	assert(type(payload) == "table", "src.syncClientItemTypes(player, payload): payload must be table")
-	return network.sync_client_item_types(state, player, payload)
+	return network_sync_payload.sync_client_item_types(state, player, payload)
 end
 
 function src.syncClientVehicleTypes(player, payload)
@@ -166,11 +188,8 @@ function src.syncClientVehicleTypes(player, payload)
 		assert(not player.isBot, "src.syncClientVehicleTypes(player, payload): player cannot be a bot")
 	end
 	assert(type(payload) == "table", "src.syncClientVehicleTypes(player, payload): payload must be table")
-	return network.sync_client_vehicle_types(state, player, payload)
+	return network_sync_payload.sync_client_vehicle_types(state, player, payload)
 end
-
--- src.setItemTypeModel and src.setItemTypeIcon are installed
--- by item_types.install() above; they are defined in item_types.lua
 
 function src.getClientState(player)
 	local connection = network.get_player_connection(state, player)
@@ -200,7 +219,7 @@ function src.listScripts()
 end
 
 function src.binary(bytes)
-	return network.binary(bytes)
+	return network_sync_payload.binary(bytes)
 end
 
 src.blob = src.binary
@@ -251,15 +270,12 @@ if not state.hooks_registered then
 			return
 		end
 
-		local native = rawget(_G, "srcIntegrationNative")
-		local ok, endpoint = pcall(
-			type(native) == "table" and native.currentPacketEndpoint or function() return nil end
-		)
-		if ok and type(endpoint) == "table" and network.authorize_account_ticket(state, account, endpoint) then
+		local endpoint = srcIntegrationNative.currentPacketEndpoint()
+		if type(endpoint) == "table" and network.authorize_account_ticket(state, account, endpoint) then
 			return
 		end
 
-		if ok and type(endpoint) == "table" then
+		if type(endpoint) == "table" then
 			local key = tostring(endpoint.address) .. ":" .. tostring(endpoint.port)
 			state.src_admission_rejections[key] = {
 				message = "SRC is required to play. subrosacustom.github.io",

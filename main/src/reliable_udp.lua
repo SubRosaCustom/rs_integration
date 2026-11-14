@@ -1,5 +1,5 @@
 -- Protocol 10 transport. Wire layout and limits match client/sync/reliable_udp.cpp.
-local M = {}
+local reliable_udp = {}
 local MAX_MESSAGE_BYTES = 256 * 1024 + 18
 local MAX_BUFFERED_BYTES = 1024 * 1024
 local BASE_CHUNK, LARGE_CHUNK = 488, 1024
@@ -21,6 +21,24 @@ local function fail(peer, reason)
 	peer.error = peer.error or reason
 end
 
+local total_bytes = 0
+
+local function add_bytes(peer, delta)
+	peer.bytes = peer.bytes + delta
+	total_bytes = total_bytes + delta
+end
+
+-- sum of every peer's buffered bytes, for the global budget
+function reliable_udp.total_bytes()
+	return total_bytes
+end
+
+-- gives a dropped or reset peer's bytes back to the counter
+function reliable_udp.release(peer)
+	total_bytes = total_bytes - peer.bytes
+	peer.bytes = 0
+end
+
 local function pieces(count)
 	local result = {}
 	for i = 1, count do
@@ -29,21 +47,64 @@ local function pieces(count)
 	return result
 end
 
+-- next_unsent only moves forward; flight holds sent-but-unacked indices
+local function init_outbound_pieces(peer, transfer, count)
+	transfer.pieces = pieces(count)
+	transfer.unacked = count
+	transfer.next_unsent = 1
+	transfer.flight = {}
+	transfer.in_flight = 0
+end
+
+local function drop_in_flight(peer, transfer)
+	peer.in_flight = peer.in_flight - transfer.in_flight
+	transfer.in_flight = 0
+end
+
+local function order_search(order, transfer_key)
+	local low, high = 1, #order
+	while low <= high do
+		local middle = (low + high) // 2
+		if order[middle] < transfer_key then
+			low = middle + 1
+		else
+			high = middle - 1
+		end
+	end
+	return low
+end
+
+local complete_bitmaps = {}
+
+local function complete_bitmap(count)
+	local cached = complete_bitmaps[count]
+	if not cached then
+		local bytes = {}
+		for i = 1, math.ceil(count / 8) do
+			local bits = math.min(8, count - (i - 1) * 8)
+			bytes[i] = string.char(2 ^ bits - 1)
+		end
+		cached = table.concat(bytes)
+		complete_bitmaps[count] = cached
+	end
+	return cached
+end
+
 local function retry_delay(peer, attempts)
 	return math.min(4, math.max(peer.retry_base, peer.rtt * 3) * 2 ^ (attempts - 1))
 end
 
-function M.new()
+function reliable_udp.new()
 	return {
-		outbound = {}, inbound = {}, completed = {}, retired = {}, acks = {}, receipts = {},
+		outbound = {}, inbound = {}, completed = {}, completed_count = 0, retired = {}, acks = {}, receipts = {},
 		latest = {}, latest_sent = {}, latest_received = {},
-		bytes = 0, now = 0, wall = -1, active = false, large = false,
+		bytes = 0, in_flight = 0, order = {}, now = 0, wall = -1, active = false, large = false,
 		probe_sent = -1, probe_due = 0, probe_id = 0, probe_attempts = 0,
 		window = 2, rtt = 0.1, cursor = 0, retry_base = 1 / 3, retry_attempts = 5,
 	}
 end
 
-function M.enqueue(peer, kind, id, bytes)
+function reliable_udp.enqueue(peer, kind, id, bytes)
 	if peer.error or (kind ~= 1 and kind ~= 3) or id < 1 or id > 0xFFFFFFFF
 		or #bytes < 18 or #bytes > MAX_MESSAGE_BYTES then
 			return false
@@ -57,15 +118,18 @@ function M.enqueue(peer, kind, id, bytes)
 		return false
 	end
 	local chunk = peer.large and LARGE_CHUNK or BASE_CHUNK
-	peer.outbound[transfer_key] = {
+	local transfer = {
 		kind = kind, id = id, generation = 1, chunk = chunk, total = #bytes, bytes = bytes,
-		pieces = pieces(math.ceil(#bytes / chunk)), created = peer.now, probe_at = -1, probes = 0,
+		created = peer.now, probe_at = -1, probes = 0,
 	}
-	peer.bytes = peer.bytes + #bytes
+	init_outbound_pieces(peer, transfer, math.ceil(#bytes / chunk))
+	peer.outbound[transfer_key] = transfer
+	table.insert(peer.order, order_search(peer.order, transfer_key), transfer_key)
+	add_bytes(peer, #bytes)
 	return true
 end
 
-function M.enqueue_latest(peer, id, bytes)
+function reliable_udp.enqueue_latest(peer, id, bytes)
 	if peer.error or type(bytes) ~= "string" or #bytes < 18 or #bytes > 503 or id < 1 or id > 0xFFFFFFFF
 		or bytes:byte(1) ~= 1 or bytes:byte(2) ~= 0 or string.unpack(">I4",bytes,11) ~= id
 		or string.unpack(">I4",bytes,15) ~= #bytes - 18 then return false end
@@ -75,11 +139,11 @@ function M.enqueue_latest(peer, id, bytes)
 	local size = peer.bytes - (previous and #previous or 0) + #bytes
 	if size > MAX_BUFFERED_BYTES then return false end
 	peer.latest_sent[name] = true
-	peer.bytes = size; peer.latest[name] = bytes
+	add_bytes(peer, size - peer.bytes); peer.latest[name] = bytes
 	return true
 end
 
-function M.advance(peer, now, active)
+function reliable_udp.advance(peer, now, active)
 	if peer.wall >= 0 and peer.active then
 		peer.now = peer.now + math.max(0, now - peer.wall)
 	end
@@ -91,6 +155,7 @@ function M.advance(peer, now, active)
 			peer.retired[kind] = math.max(peer.retired[kind] or 0, transfer_key % 4294967296)
 			peer.acks[transfer_key] = nil
 			peer.completed[transfer_key] = nil
+			peer.completed_count = peer.completed_count - 1
 		end
 	end
 	for _, transfer in pairs(peer.inbound) do
@@ -115,30 +180,17 @@ local function fallback(peer)
 		if transfer.chunk ~= BASE_CHUNK then
 			transfer.generation = transfer.generation + 1
 			transfer.chunk = BASE_CHUNK
-			transfer.pieces = pieces(math.ceil(transfer.total / BASE_CHUNK))
+			drop_in_flight(peer, transfer)
+			init_outbound_pieces(peer, transfer, math.ceil(transfer.total / BASE_CHUNK))
 			transfer.probe_at = -1
 			transfer.probes = 0
 		end
 	end
 end
 
-local function ack(peer, transfer, complete)
-	local bitmap = {}
-	for i = 1, math.ceil(#transfer.pieces / 8) do
-		bitmap[i] = 0
-	end
-	for i, piece in ipairs(transfer.pieces) do
-		if complete or piece.acked then
-			local byte = math.floor((i - 1) / 8) + 1
-			bitmap[byte] = bitmap[byte] + 2 ^ ((i - 1) % 8)
-		end
-	end
-	for i, byte in ipairs(bitmap) do
-		bitmap[i] = string.char(byte)
-	end
-	peer.acks[key(transfer.kind, transfer.id)] = string.pack(">BBI4I2I2B",
-		2, transfer.kind, transfer.id, transfer.generation, #transfer.pieces, complete and 1 or 0
-	) .. table.concat(bitmap)
+local function ack(peer, kind, id, generation, count, complete, bitmap)
+	peer.acks[key(kind, id)] = string.pack(">BBI4I2I2B", 2, kind, id, generation, count, complete and 1 or 0)
+		.. (complete and complete_bitmap(count) or table.concat(bitmap))
 end
 
 local function next_frame(peer, max_bytes)
@@ -181,41 +233,34 @@ local function next_frame(peer, max_bytes)
 	end
 	for name, bytes in pairs(peer.latest) do
 		if #bytes + 1 <= max_bytes then
-			peer.latest[name] = nil; peer.bytes = peer.bytes - #bytes
+			peer.latest[name] = nil; add_bytes(peer, -#bytes)
 			return string.char(6) .. bytes
 		end
 	end
-	local in_flight = 0
-	local order = {}
-	for transfer_key, transfer in pairs(peer.outbound) do
-		order[#order + 1] = transfer_key
-		for _, piece in ipairs(transfer.pieces) do
-			if piece.sent >= 0 and not piece.acked then
-				in_flight = in_flight + 1
-			end
-		end
-	end
-	table.sort(order)
-	local start = 1
-	for i, transfer_key in ipairs(order) do
-		if transfer_key <= peer.cursor then
-			start = i + 1
-		end
-	end
+	local in_flight = peer.in_flight
+	local order = peer.order
+	local start = order_search(order, peer.cursor + 1)
 	for visited = 0, #order - 1 do
 		local transfer_key = order[(start + visited - 1) % #order + 1]
 		local transfer = peer.outbound[transfer_key]
-		local selected, all_acked = nil, true
-		for i, piece in ipairs(transfer.pieces) do
-			if not piece.acked then
-				all_acked = false
-				if piece.sent >= 0 and peer.now - piece.sent >= retry_delay(peer, piece.attempts) then
-					selected = i
-					break
-				end
-				if piece.sent < 0 and in_flight < math.floor(peer.window) and not selected then
+		local selected = nil
+		local all_acked = transfer.unacked == 0
+		if not all_acked then
+			for i in pairs(transfer.flight) do
+				local piece = transfer.pieces[i]
+				if (not selected or i < selected)
+					and peer.now - piece.sent >= retry_delay(peer, piece.attempts) then
 					selected = i
 				end
+			end
+			if not selected and in_flight < math.floor(peer.window) then
+				local pieces_list = transfer.pieces
+				local cursor = transfer.next_unsent
+				while cursor <= #pieces_list and (pieces_list[cursor].sent >= 0 or pieces_list[cursor].acked) do
+					cursor = cursor + 1
+				end
+				transfer.next_unsent = cursor
+				if cursor <= #pieces_list then selected = cursor end
 			end
 		end
 		if all_acked and (transfer.probe_at < 0 or peer.now - transfer.probe_at >= retry_delay(peer, math.max(1, transfer.probes))) then
@@ -240,6 +285,11 @@ local function next_frame(peer, max_bytes)
 			if piece.sent >= 0 and not all_acked then
 				peer.window = math.max(1, peer.window / 2)
 			end
+			if piece.sent < 0 and not piece.acked then
+				transfer.flight[selected] = true
+				transfer.in_flight = transfer.in_flight + 1
+				peer.in_flight = peer.in_flight + 1
+			end
 			piece.sent = peer.now
 			piece.attempts = piece.attempts + 1
 			peer.cursor = transfer_key
@@ -251,7 +301,7 @@ local function next_frame(peer, max_bytes)
 	return nil
 end
 
-function M.next(peer)
+function reliable_udp.next(peer)
 	local first = next_frame(peer, 1156)
 	local budget = peer.large and 1156 or 504
 	if not first or #first + 5 > budget then return first end
@@ -269,7 +319,7 @@ function M.next(peer)
 	return string.pack(">BI2", 5, count) .. table.concat(parts)
 end
 
-function M.receive(peer, packet, available_bytes)
+function reliable_udp.receive(peer, packet, available_bytes)
 	available_bytes = available_bytes or MAX_BUFFERED_BYTES
 	if peer.error or #packet == 0 or #packet > 1156 then
 		return {}
@@ -292,7 +342,7 @@ function M.receive(peer, packet, available_bytes)
 		local deliveries, initial_bytes = {}, peer.bytes
 		for _, frame in ipairs(frames) do
 			local reserved = math.max(0, peer.bytes - initial_bytes)
-			local completed = M.receive(peer, frame, math.max(0, available_bytes - reserved))
+			local completed = reliable_udp.receive(peer, frame, math.max(0, available_bytes - reserved))
 			if peer.error then return {} end
 			for _, delivery in ipairs(completed) do deliveries[#deliveries + 1] = delivery end
 		end
@@ -367,6 +417,12 @@ function M.receive(peer, packet, available_bytes)
 					peer.rtt = math.max(0.01, math.min(2, 0.875 * peer.rtt + 0.125 * (peer.now - piece.sent)))
 				end
 				piece.acked = true
+				transfer.unacked = transfer.unacked - 1
+				if piece.sent >= 0 then
+					transfer.flight[i] = nil
+					transfer.in_flight = transfer.in_flight - 1
+					peer.in_flight = peer.in_flight - 1
+				end
 				peer.window = math.min(8, peer.window + 1 / peer.window)
 			end
 		end
@@ -376,7 +432,9 @@ function M.receive(peer, packet, available_bytes)
 				return {}
 			end
 			peer.receipts[#peer.receipts + 1] = { kind = kind, id = id, }
-			peer.bytes = peer.bytes - transfer.total
+			add_bytes(peer, -transfer.total)
+			drop_in_flight(peer, transfer)
+			table.remove(peer.order, order_search(peer.order, transfer_key))
 			peer.outbound[transfer_key] = nil
 		end
 		return {}
@@ -402,7 +460,7 @@ function M.receive(peer, packet, available_bytes)
 			fail(peer, "UDP completed message changed size")
 			return {}
 		end
-		ack(peer, { kind = kind, id = id, generation = generation, pieces = pieces(count), }, true)
+		ack(peer, kind, id, generation, count, true)
 		return {}
 	end
 	local transfer = peer.inbound[transfer_key]
@@ -414,7 +472,7 @@ function M.receive(peer, packet, available_bytes)
 			fail(peer, "UDP restart changed size")
 			return {}
 		end
-		peer.bytes = peer.bytes - transfer.total
+		add_bytes(peer, -transfer.total)
 		peer.inbound[transfer_key] = nil
 		transfer = nil
 	end
@@ -424,16 +482,21 @@ function M.receive(peer, packet, available_bytes)
 			return {}
 		end
 		if count_entries(peer.inbound) >= 32 or peer.bytes + total > MAX_BUFFERED_BYTES
-			or total > available_bytes or count_entries(peer.completed) >= 32768 then
+			or total > available_bytes or peer.completed_count >= 32768 then
 				fail(peer, "UDP receive budget exhausted")
 				return {}
 			end
 		transfer = {
 			kind = kind, id = id, generation = generation, total = total, chunk = chunk,
 			pieces = pieces(count), fragments = {}, created = peer.now,
+			received = 0, bits = {}, bit_chars = {},
 		}
+		for i = 1, math.ceil(count / 8) do
+			transfer.bits[i] = 0
+			transfer.bit_chars[i] = "\0"
+		end
 		peer.inbound[transfer_key] = transfer
-		peer.bytes = peer.bytes + total
+		add_bytes(peer, total)
 	end
 	if transfer.total ~= total or transfer.chunk ~= chunk then
 		fail(peer, "conflicting UDP fragment metadata")
@@ -445,11 +508,17 @@ function M.receive(peer, packet, available_bytes)
 		return {}
 	end
 	transfer.fragments[index + 1] = bytes
-	transfer.pieces[index + 1].acked = true
-	ack(peer, transfer, false)
-	for _, piece in ipairs(transfer.pieces) do
-		if not piece.acked then
-		return {} end
+	local piece = transfer.pieces[index + 1]
+	if not piece.acked then
+		piece.acked = true
+		transfer.received = transfer.received + 1
+		local byte = index // 8 + 1
+		transfer.bits[byte] = transfer.bits[byte] + 2 ^ (index % 8)
+		transfer.bit_chars[byte] = string.char(transfer.bits[byte])
+	end
+	ack(peer, kind, id, transfer.generation, count, false, transfer.bit_chars)
+	if transfer.received < count then
+		return {}
 	end
 	if transfer.offered then
 		return {}
@@ -458,23 +527,26 @@ function M.receive(peer, packet, available_bytes)
 	return { { kind = kind, id = id, bytes = table.concat(transfer.fragments), }, }
 end
 
-function M.accept(peer, kind, id)
+function reliable_udp.accept(peer, kind, id)
 	local transfer_key = key(kind, id)
 	local transfer = peer.inbound[transfer_key]
 	if not transfer then
 		return false
 	end
-	ack(peer, transfer, true)
+	ack(peer, kind, id, transfer.generation, #transfer.pieces, true)
+	if not peer.completed[transfer_key] then
+		peer.completed_count = peer.completed_count + 1
+	end
 	peer.completed[transfer_key] = { total = transfer.total, expiry = peer.now + RETENTION, }
-	peer.bytes = peer.bytes - transfer.total
+	add_bytes(peer, -transfer.total)
 	peer.inbound[transfer_key] = nil
 	return true
 end
 
-function M.take_receipts(peer)
+function reliable_udp.take_receipts(peer)
 	local receipts = peer.receipts
 	peer.receipts = {}
 	return receipts
 end
 
-return M
+return reliable_udp

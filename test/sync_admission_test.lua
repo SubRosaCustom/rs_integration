@@ -1,49 +1,59 @@
-local file = assert(io.open('main/src/network.lua'))
-local source = file:read('*a')
-file:close()
-local resolve_source = assert(source:match('(local function resolve_client_player_from_hello.-)\nlocal function apply_bound_player'))
+-- Run from rs_integration/: lua test/sync_admission_test.lua
+bit32 = { bxor = function(a, b) return (a ~ b) & 0xFFFFFFFF end, band = function(a, b) return (a & b) & 0xFFFFFFFF end }
+package.path = "./?.lua;" .. package.path
+package.preload["main.json"] = function() return dofile("test/main/json.lua") end
+package.loaded["main.src.log"] = { info = function() end, warn = function() end }
+
+-- payload and transfer producers are the observable outputs of admission
+local sent, queued = 0, 0
+package.loaded["main.src.index_response"] = { bytes = function() sent = sent + 1; return "index" end }
+package.loaded["main.src.network_sync_payload"] = {
+	send_initial_custom_item_sync = function() sent = sent + 1 end,
+	send_initial_custom_vehicle_sync = function() sent = sent + 1 end,
+}
+package.loaded["main.src.network_transfer"] = {
+	queue_sync_file = function() queued = queued + 1 end,
+	queue_sync_bundle = function() queued = queued + 1 end,
+}
+
+local session = require("main.src.network_session")
+local handshake = require("main.src.network_handshake")
+
 local player_list = {}
-local env = setmetatable({
-    players = {getNonBots = function() return player_list end},
-    parse_positive_integer = function(value) local n = tonumber(value); return n and n > 0 and n or nil end,
-}, {__index = _G})
-local resolve = assert(load(resolve_source .. '\nreturn resolve_client_player_from_hello', 'admission', 't', env))()
-local connection = {address = '192.0.2.1'}
-local client = {game_address = '192.0.2.1', game_port = 1234}
-local state = {clients = {[connection] = client}}
-local player = {account = {}, phoneNumber = 42, subRosaID = 7,
-    connection = {address = '192.0.2.1', port = 1234}}
+players = { getNonBots = function() return player_list end }
+local connection = { address = "192.0.2.1", is_open = true, close = function() end, discard_pending_sends = function() end }
+local client = { send_queue = {}, hello = true, game_address = "192.0.2.1", game_port = 1234, hello_payload = { phoneNumber = 42 } }
+local state = {
+	clients = { [connection] = client }, config = {}, sync_generation = 1,
+	clients_by_endpoint = {}, clients_by_token = {}, udp_backlog = {},
+}
+local player = { account = {}, phoneNumber = 42, subRosaID = 7, connection = { address = "192.0.2.1", port = 1234 } }
 player_list[1] = player
-assert(resolve(state, connection, {phoneNumber = 42}) == player)
+
+local function resolves(hello)
+	return session.resolve_client_player_from_hello(state, connection, hello) == player
+end
+assert(resolves({ phoneNumber = 42 }), "matching account-backed player resolves")
 player.account = nil
-assert(not resolve(state, connection, {phoneNumber = 42}))
+assert(not resolves({ phoneNumber = 42 }), "player without an account is not admitted")
 player.account = {}
 player.connection.port = 1235
-assert(not resolve(state, connection, {phoneNumber = 42}))
+assert(not resolves({ phoneNumber = 42 }), "mismatched game port is not admitted")
 player.connection.port = 1234
-assert(not resolve(state, connection, {phoneNumber = 43}))
-client.game_address = '192.0.2.2'
-assert(not resolve(state, connection, {phoneNumber = 42}))
-client.game_address = '192.0.2.1'
-local handlers = assert(source:match('(local function handle_index_request.-)\nlocal function handle_legacy_event'))
-local authorized, sent, queued = false, 0, 0
-env.require_hello = function() return client end
-env.refresh_client_player_binding = function() return authorized end
-env.send_initial_custom_item_sync = function() sent = sent + 1 end
-env.send_initial_custom_vehicle_sync = function() sent = sent + 1 end
-env.enqueue_frame = function() sent = sent + 1 end
-env.bundle_metadata_list = function() return {} end
-env.queue_sync_file = function() queued = queued + 1 end
-env.queue_sync_bundle = function() queued = queued + 1 end
-state.config = {}
-local index, file_request, bundle_request = assert(load(handlers .. '\nreturn handle_index_request, handle_file_request, handle_bundle_request', 'handlers', 't', env))()
-index(state, connection)
-file_request(state, connection, {path = 'x'})
-bundle_request(state, connection, {id = 'x'})
-assert(client.pending_index_request and sent == 0 and queued == 0)
-authorized = true
-index(state, connection)
-file_request(state, connection, {path = 'x'})
-bundle_request(state, connection, {id = 'x'})
-assert(not client.pending_index_request and sent == 3 and queued == 2)
-print('Sync admission gate passed')
+assert(not resolves({ phoneNumber = 43 }), "mismatched phone number is not admitted")
+client.game_address = "192.0.2.2"
+assert(not resolves({ phoneNumber = 42 }), "mismatched game address is not admitted")
+client.game_address = "192.0.2.1"
+
+-- requests before native admission send nothing; they are served once the player is bound
+player.account = nil
+handshake.handle_frame(state, connection, { type = "INDEX_REQ" })
+handshake.handle_frame(state, connection, { type = "FILE_REQ", payload = { path = "x" } })
+handshake.handle_frame(state, connection, { type = "BUNDLE_REQ", payload = { id = "x" } })
+assert(sent == 0 and queued == 0, "unadmitted client must receive no content")
+player.account = {}
+handshake.handle_frame(state, connection, { type = "INDEX_REQ" })
+handshake.handle_frame(state, connection, { type = "FILE_REQ", payload = { path = "x" } })
+handshake.handle_frame(state, connection, { type = "BUNDLE_REQ", payload = { id = "x" } })
+assert(sent == 3 and queued == 2 and #client.send_queue == 1, "admitted client receives the index and queued content")
+print("Sync admission gate passed")

@@ -1,84 +1,67 @@
--- Production-function harness; native player/socket boundaries are supplied by fixtures.
-bit32={bxor=function(a,b) return (a ~ b)&0xFFFFFFFF end,band=function(a,b) return (a & b)&0xFFFFFFFF end}
-local function read(path) local f=assert(io.open(path));local s=f:read('*a');f:close();return s end
-local source=read('main/src/network.lua')
-local queue=assert(source:match('(local function queue_reliable_udp_event.-)\nlocal function queue_reliable_udp_result'))
-local dispatch=assert(source:match('(function M.on_udp_datagram.-)\nfunction M.ensure_tcp_server'))
-local env=setmetatable({M={},SERVER_EVENT_ID_MAX=0x7FFFFFFF,unpack_values=table.unpack},{__index=_G})
-env.udp_events=require('main.src.udp_events');env.event_codec=require('main.src.event_codec')
-env.log={warn=function(...) error(string.format(...)) end}
-local connection={is_open=true}
-local client={hello=true,bound=true,pending_events={},pending_results={}}
-local state={clients={[connection]=client},next_event_id=1,config={maxEventBytes=262144},tick=0}
-local queue_event=assert(load(queue..'\nreturn queue_reliable_udp_event','production queue','t',env))()
-local hash=assert(env.udp_events.hash_event_name('camera'))
-local args=assert(env.event_codec.encode_args(1,2,3))
-assert(queue_event(state,connection,'camera',hash,args,true))
-assert(next(client.pending_events)==nil and next(client.pending_results)==nil)
-assert(queue_event(state,connection,'camera',hash,args,true))
-local r=require('main.src.reliable_udp');r.advance(client.udp_reliable,0,true);r.next(client.udp_reliable)
-local receiver=r.new();local deliveries=r.receive(receiver,assert(r.next(client.udp_reliable)))
-assert(#deliveries==1 and deliveries[1].latest and deliveries[1].id==2)
-assert(not r.next(receiver) and #r.take_receipts(receiver)==0)
-assert(queue_event(state,connection,'normal',hash,args,false))
-assert(client.pending_events[3] and next(client.pending_results)==nil)
-local calls=0;local authorized=true
-env.validate_bound_player=function(c,p) assert(c==connection and p==client);return authorized end
-env.handle_client_event=function(s,c,m) assert(s==state and c==connection and m.latest);calls=calls+1 end
-env.udp_events.accept=function() error('Unexpected receipt') end
-env.queue_reliable_udp_result=function() error('Unexpected processing result') end
-assert(load(dispatch,'production dispatch','t',env))()
-env.M.on_udp_datagram(state,{connection=connection,client=client,messages={{kind=1,latest=true}}})
-assert(calls==1 and next(client.pending_results)==nil)
-authorized=false
-env.M.on_udp_datagram(state,{connection=connection,client=client,messages={{kind=1,latest=true}}})
-assert(calls==1,'Bound-player authorization still applies')
-print('Latest server path: queue/dispatch, no results/receipts, replacement and authorization passed')
--- Flushing messages must not free their session-scoped channel budget.
-local sender, target = r.new(), r.new()
-r.advance(sender, 0, true)
-assert(r.next(sender)) -- Consume the startup size probe.
-local function latest_message(id, name)
-	return string.pack('>BBc8I4I4', 1, 0, name, id, 0)
+-- Run from rs_integration/: lua test/latest_event_path_test.lua
+bit32 = { bxor = function(a, b) return (a ~ b) & 0xFFFFFFFF end, band = function(a, b) return (a & b) & 0xFFFFFFFF end }
+package.path = "./?.lua;" .. package.path
+package.preload["main.json"] = function() return dofile("test/main/json.lua") end
+package.loaded["main.src.log"] = { info = function() end, warn = function() end }
+
+local network_events = require("main.src.network_events")
+local udp = require("main.src.udp_events")
+local codec = require("main.src.event_codec")
+local reliable = require("main.src.reliable_udp")
+
+local function new_client()
+	local connection = { address = "192.0.2.1", is_open = true, close = function(self) self.is_open = false end, discard_pending_sends = function() end }
+	local client = {
+		hello = true, bound = true, next_event_id = 1, pending_events = {}, pending_results = {},
+		warn_limits = {}, game_address = "192.0.2.1", game_port = 1234,
+		player = { account = {}, connection = { address = "192.0.2.1", port = 1234 } },
+	}
+	udp.reset_client(client)
+	return connection, client
 end
-for id = 1, 32 do
-	assert(r.enqueue_latest(sender, id, latest_message(id, string.format('%08d', id))))
-	assert(#r.receive(target, assert(r.next(sender))) == 1)
-end
-assert(not r.enqueue_latest(sender, 33, latest_message(33, '00000033')))
-assert(sender.bytes == 0 and not sender.error and not target.error)
-assert(r.enqueue_latest(sender, 34, latest_message(34, '00000001')))
-assert(#r.receive(target, assert(r.next(sender))) == 1)
-assert(r.enqueue_latest(r.new(), 33, latest_message(33, '00000033')))
-print('Latest-state channel budget survives flushes and resets with the session')
--- Exercise public wrappers and shared serializers from production source.
-local core_source=read('../core/main/init.lua')
-local core_emit=assert(core_source:match('(local function emit_server_event.-)\nfunction __src_dispatch_server_event'))
-local core_codec=dofile('../core/main/eventCodec.lua')
-local lane,wire
-local function capture(expected)
-    return function(name,event_hash,bytes) assert(name=='camera' and #event_hash==8);lane=expected;wire=bytes;return false end
-end
-local core_env=setmetatable({event_codec=core_codec,server_event_names_by_hash={},
-    __src_emit_server_event=capture('reliable'),__src_emit_server_event_latest=capture('latest')},{__index=_G})
-assert(load(core_emit,'core public API','t',core_env))()
-assert(core_env.emitServerEventLatest('camera',42,nil,'pose')==false and lane=='latest')
-local values=assert(core_codec.decodeArgs(wire));assert(values[1]==42 and values[2]==nil and values[3]=='pose' and values.n==3)
-assert(core_env.emitServerEvent('camera',true)==false and lane=='reliable')
-local api_source=read('main/src/init.lua')
-local server_emit=assert(api_source:match('(local function emit_client_event.-)\nworld_mutations.install'))
-local api_env=setmetatable({src={},state=state,event_codec=env.event_codec,network={emit_client_event=function(s,p,name,event_hash,bytes,latest)
-    assert(s==state and p==nil and name=='camera' and #event_hash==8);wire=bytes;lane=latest and 'latest' or 'reliable';return 2
-end}},{__index=_G})
-assert(load(server_emit,'server public API','t',api_env))()
-assert(api_env.src.emitClientEventLatest(nil,'camera',42,nil,'pose')==2 and lane=='latest')
-local args=assert(env.event_codec.decode_args(wire));assert(args.n==3 and args[1]==42 and args[3]=='pose')
-assert(api_env.src.emitClientEvent(nil,'camera',true)==2 and lane=='reliable')
-assert(not pcall(api_env.src.emitClientEventLatest,{},'camera'),'Invalid player targets rejected')
-assert(not pcall(core_env.emitServerEventLatest,'',1),'Empty event names rejected')
-local core_meta=read('../core/.meta/template/globals.lua')
-local server_meta=read('.meta/template/globals.lua')
-assert(core_meta:find('function emitServerEventLatest(name, ...) end',1,true))
-assert(core_meta:find('function __src_emit_server_event_latest(eventName, eventHash, argsBytes) end',1,true))
-assert(server_meta:find('function src.emitClientEventLatest(player, name, ...) end',1,true))
-print('Latest public APIs: serializers, nil arguments, returns, lanes, invalid inputs and metadata passed')
+
+local connection, client = new_client()
+local state = {
+	clients = { [connection] = client }, config = { maxEventBytes = 262144 }, tick = 0,
+	event_hashes_by_name = {}, event_handlers = {}, event_handlers_by_hash = {},
+}
+local hash = assert(udp.hash_event_name("camera"))
+local args = assert(codec.encode(1, 2, 3))
+
+-- latest events carry no pending result or receipt; a newer one replaces the older one
+assert(network_events.emit_client_event(state, nil, "camera", hash, args, true) == 1)
+assert(next(client.pending_events) == nil and next(client.pending_results) == nil, "latest event must not be tracked for retry")
+assert(network_events.emit_client_event(state, nil, "camera", hash, args, true) == 1)
+reliable.advance(client.udp_reliable, 0, true)
+reliable.next(client.udp_reliable) -- startup size probe
+local receiver = reliable.new()
+local deliveries = reliable.receive(receiver, assert(reliable.next(client.udp_reliable)))
+assert(#deliveries == 1 and deliveries[1].latest and deliveries[1].id == 2, "only the newest latest event is delivered")
+assert(#reliable.take_receipts(receiver) == 0, "latest events are not acknowledged")
+
+-- ordinary events are tracked and ids are per client
+assert(network_events.emit_client_event(state, nil, "normal", hash, args, false) == 1)
+assert(client.pending_events[3] and next(client.pending_results) == nil)
+local connection2, client2 = new_client()
+state.clients[connection2] = client2
+assert(network_events.emit_client_event(state, nil, "normal", hash, args, false) == 2)
+assert(client2.pending_events[1] and client2.next_event_id == 2 and client.next_event_id == 5)
+
+-- an exhausted id space refuses further events for that client only
+client.next_event_id = 0xFFFFFFFF + 1
+state.clients[connection2] = nil
+local n = network_events.emit_client_event(state, nil, "normal", hash, args, false); assert(n == 0, tostring(n))
+
+-- inbound latest events reach handlers without results or receipts, and authorization still applies
+local got
+network_events.on_client_event(state, "camera", function(_, a, b, c) got = { a, b, c } end)
+local message = { kind = 1, latest = true, event_hash = hash, args = { n = 3, 7, 8, 9 } }
+network_events.on_udp_datagram(state, { connection = connection, client = client, messages = { message } })
+assert(got and got[1] == 7 and got[3] == 9, "latest event must reach the handler")
+assert(next(client.pending_results) == nil)
+got = nil
+client.player.account = nil
+network_events.on_udp_datagram(state, { connection = connection, client = client, messages = { message } })
+assert(got == nil, "unauthorized player must not reach handlers")
+
+print("latest events: queue, replacement, no receipts, dispatch and authorization passed")

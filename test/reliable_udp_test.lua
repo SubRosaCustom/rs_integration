@@ -187,3 +187,74 @@ assert(reliable.enqueue_latest(latest_sender,3,latest_payload(3,485)))
 assert(#reliable.next(latest_sender)+44<=548)
 assert(not reliable.enqueue_latest(latest_sender,4,latest_payload(4,486)))
 print("Latest state: replacement, reordering, duplicates, size bounds, no receipts or retries passed")
+
+-- incremental ack bitmap matches an independent one after every fragment
+do
+	local count = 538
+	local message = payload(262162)
+	local source = reliable.new()
+	reliable.advance(source, 0, true)
+	assert(reliable.enqueue(source, 1, 40, message))
+	local frames = {}
+	local total = #message
+	for index = 0, count - 1 do
+		frames[index + 1] = string.pack(">BBI4I2I4I2I2", 1, 1, 40, 1, total, 488, index)
+			.. message:sub(index * 488 + 1, (index + 1) * 488)
+	end
+	local sink = reliable.new()
+	local seen = {}
+	local seen_count = 0
+	local order = {}
+	for i = 1, count do order[i] = (i * 211) % count + 1 end -- 211 is coprime with 538
+	for _, frame_index in ipairs(order) do
+		local delivered = reliable.receive(sink, frames[frame_index])
+		assert(not sink.error, sink.error)
+		if not seen[frame_index] then seen[frame_index] = true; seen_count = seen_count + 1 end
+		local expected = {}
+		for i = 1, math.ceil(count / 8) do expected[i] = 0 end
+		for index in pairs(seen) do
+			local byte = (index - 1) // 8 + 1
+			expected[byte] = expected[byte] + 2 ^ ((index - 1) % 8)
+		end
+		for i, byte in ipairs(expected) do expected[i] = string.char(byte) end
+		local ack_frame = assert(reliable.next(sink))
+		assert(ack_frame == string.pack(">BBI4I2I2B", 2, 1, 40, 1, count, 0) .. table.concat(expected))
+		assert(#delivered == (seen_count == count and 1 or 0))
+	end
+	assert(reliable.accept(sink, 1, 40))
+	local complete = assert(reliable.next(sink))
+	assert(complete == string.pack(">BBI4I2I2B", 2, 1, 40, 1, count, 1) .. string.rep("\255", 67) .. "\3")
+	assert(sink.bytes == 0)
+end
+
+-- round-robin sending and byte accounting
+do
+	local before = reliable.total_bytes()
+	local sender, receiver = reliable.new(), reliable.new()
+	reliable.advance(sender, 0, true); reliable.advance(receiver, 0, true)
+	for id = 1, 20 do assert(reliable.enqueue(sender, 1, id * 3, payload(600))) end
+	assert(reliable.total_bytes() == before + 20 * 600 and sender.bytes == 20 * 600)
+	local done = 0
+	for step = 1, 4000 do
+		local now = step * 0.01
+		reliable.advance(sender, now, true); reliable.advance(receiver, now, true)
+		local packet = reliable.next(sender)
+		if packet then
+			for _, event in ipairs(reliable.receive(receiver, packet)) do
+				reliable.accept(receiver, event.kind, event.id)
+			end
+		end
+		local back = reliable.next(receiver)
+		if back then reliable.receive(sender, back) end
+		done = done + #reliable.take_receipts(sender)
+		assert(not sender.error and not receiver.error)
+		assert(reliable.total_bytes() == before + sender.bytes + receiver.bytes)
+		if done == 20 then break end
+	end
+	assert(done == 20 and #sender.order == 0 and sender.in_flight == 0)
+	assert(sender.bytes == 0 and receiver.bytes == 0 and reliable.total_bytes() == before)
+	assert(reliable.enqueue(sender, 1, 99, payload(100)))
+	reliable.release(sender)
+	assert(sender.bytes == 0 and reliable.total_bytes() == before)
+end
+print("Lua UDP incremental ack bitmaps, ordered scheduling and global byte counter passed")

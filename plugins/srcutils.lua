@@ -18,7 +18,7 @@ local disabled_plugins_file = "disabledPlugins.json"
 local message_player = messagePlayerWrap
 
 local function refresh_now()
-	src.refreshSyncFiles()
+	return src.refreshSyncFiles()
 end
 
 local function scripts_root()
@@ -147,8 +147,11 @@ plugin.commands["/srcrefresh"] = {
 	end,
 	call = function(ply)
 		assert(src.enabled, "SRC is disabled")
-		refresh_now()
+		local changed = refresh_now()
 		local message = "SRC refresh queued for all connected clients"
+		if not changed then
+			message = "SRC refresh: no content changes, clients not notified"
+		end
 		message_player(ply, message)
 	end,
 }
@@ -185,6 +188,20 @@ plugin.commands["/srcstatus"] = {
 				state.persistent_mode ~= "" and state.persistent_mode or "<none>"
 			)
 		)
+		local stats = srcIntegrationNative.udpStats()
+		if type(stats) == "table" then
+			message_player(
+				ply,
+				string.format(
+					"SRC udp sendEagain=%s sndbuf=%s rcvbuf=%s",
+					tostring(stats.eagain),
+					tostring(stats.sndbuf),
+					tostring(stats.rcvbuf)
+				)
+			)
+		else
+			message_player(ply, "SRC udp stats failed: " .. tostring(stats))
+		end
 	end,
 }
 
@@ -208,7 +225,7 @@ plugin.commands["/srcclients"] = {
 					generation = tostring(client.generation or 0),
 					send_frames = #client.send_queue,
 					pending_files = #client.pending_file_requests,
-					pending_events = table.numElements(client.pending_events or {}),
+					pending_events = table.numElements(client.pending_events),
 				}
 			end
 		end
@@ -327,8 +344,11 @@ plugin.commands["/srcreloadplugin"] = {
 		local plugin_name = args[1]
 		assert(has_client_runtime(plugin_name), "Invalid client plugin")
 
-		src.reloadClientPlugin(plugin_name)
-		message_player(ply, string.format("Reloading SRC client plugin %s", plugin_name))
+		if src.reloadClientPlugin(plugin_name) then
+			message_player(ply, string.format("Reloading SRC client plugin %s", plugin_name))
+		else
+			message_player(ply, string.format("SRC client plugin %s unchanged, clients not notified", plugin_name))
+		end
 	end,
 }
 
@@ -350,8 +370,8 @@ plugin.commands["/srcdumpstate"] = {
 				total_send_frames = total_send_frames + #client.send_queue
 				total_send_bytes = total_send_bytes + count_queued_bytes(client.send_queue)
 				total_pending_files = total_pending_files + #client.pending_file_requests
-				total_pending_events = total_pending_events + table.numElements(client.pending_events or {})
-				total_awaiting_results = total_awaiting_results + table.numElements(client.awaiting_results or {})
+				total_pending_events = total_pending_events + table.numElements(client.pending_events)
+				total_awaiting_results = total_awaiting_results + table.numElements(client.awaiting_results)
 			end
 		end
 
@@ -370,12 +390,11 @@ plugin.commands["/srcdumpstate"] = {
 		message_player(
 			ply,
 			string.format(
-				"scripts=%d assets=%d loadedLevel=%s persistentMode=%s nextEventID=%s",
+				"scripts=%d assets=%d loadedLevel=%s persistentMode=%s",
 				#state.scripts,
 				#state.asset_files,
 				state.loaded_level ~= "" and state.loaded_level or "<none>",
-				state.persistent_mode ~= "" and state.persistent_mode or "<none>",
-				tostring(state.next_event_id)
+				state.persistent_mode ~= "" and state.persistent_mode or "<none>"
 			)
 		)
 		message_player(
@@ -384,7 +403,7 @@ plugin.commands["/srcdumpstate"] = {
 				"watchEnabled=%s watchRoot=%s watchedDirs=%d pendingRefreshTick=%s",
 				tostring(state.config.autoRefreshEnabled == true),
 				tostring(state.watched_root or "<none>"),
-				table.numElements(state.watched_directories or {}),
+				table.numElements(state.watched_directories),
 				tostring(state.pending_refresh_tick or "<none>")
 			)
 		)
@@ -434,8 +453,9 @@ plugin:addHook("Logic", function()
 
 	watcher.ensure(state)
 	watcher.process(state, function()
-		refresh_now()
-		plugin:print("auto-refresh queued")
+		if refresh_now() then
+			plugin:print("auto-refresh queued")
+		end
 	end)
 end)
 

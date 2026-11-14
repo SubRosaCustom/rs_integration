@@ -1,14 +1,14 @@
 -- Client plugin entrypoints, not server plugins or per-plugin settings, own assets.
 local paths = require("main.src.sync_paths")
 local json = require("main.json")
-local M = {}
+local client_scope = {}
 local MAX_SCRIPT_BYTES = 2 * 1024 * 1024
 
-function M.valid_owner(name)
+function client_scope.valid_owner(name)
 	return type(name) == "string" and name:match("^[A-Za-z0-9_-]+$") ~= nil
 end
 
-function M.read_disabled(config)
+function client_scope.read_disabled(config)
 	local root = paths.scripts_root(config)
 	assert(not paths.exists(root) or paths.is_contained(config.clientRoot, root), "Unsafe client scripts root")
 	local path = paths.join(root, "disabledPlugins.json")
@@ -27,13 +27,13 @@ function M.read_disabled(config)
 	assert(ok and type(decoded) == "table", "Invalid disabledPlugins.json")
 	local disabled = {}
 	for key, name in pairs(decoded) do
-		assert(type(key) == "number" and M.valid_owner(name), "Invalid disabledPlugins.json entry")
+		assert(type(key) == "number" and client_scope.valid_owner(name), "Invalid disabledPlugins.json entry")
 		disabled[name] = true
 	end
 	return disabled, source
 end
 
-function M.names(config, namespace)
+function client_scope.names(config, namespace)
 	assert(namespace == "plugins" or namespace == "modes")
 	local scripts = paths.scripts_root(config)
 	local root = paths.join(scripts, namespace)
@@ -44,11 +44,14 @@ function M.names(config, namespace)
 	local found = {}
 	for _, entry in ipairs(entries) do
 		local name = entry.isDirectory and entry.name or entry.name:match("^(.+)%.lua$")
-		if M.valid_owner(name) then
+		if client_scope.valid_owner(name) then
 			local path = paths.join(root, entry.name)
 			if entry.isDirectory then path = paths.join(path, "init.lua") end
 			if paths.is_contained(root, path) then
-				assert(paths.read_file(path, MAX_SCRIPT_BYTES) ~= nil, "Cannot read client entry: " .. path)
+				-- existence and size only, the snapshot build fails loudly otherwise
+				local size = paths.file_size(path)
+				assert(size ~= nil, "Cannot read client entry: " .. path)
+				assert(size <= MAX_SCRIPT_BYTES, "Client entry exceeds size limit: " .. path)
 				found[name] = true
 			end
 		end
@@ -58,17 +61,17 @@ function M.names(config, namespace)
 	return names
 end
 
-function M.enabled(config)
-	local disabled, source = M.read_disabled(config)
+function client_scope.enabled(config)
+	local disabled, source = client_scope.read_disabled(config)
 	local enabled = {}
-	for _, name in ipairs(M.names(config, "plugins")) do
+	for _, name in ipairs(client_scope.names(config, "plugins")) do
 		if not disabled[name] then enabled[#enabled + 1] = name end
 	end
 	return enabled, source
 end
 
-function M.signature(config)
-	return table.concat(M.enabled(config), "\n")
+function client_scope.signature(config)
+	return table.concat(client_scope.enabled(config), "\n")
 end
 
-return M
+return client_scope

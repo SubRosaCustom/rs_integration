@@ -1,7 +1,7 @@
 local codec = require("main.src.threaded_tcp_codec")
 local json = require("main.json")
 
-local M = {}
+local threaded_tcp_server = {}
 local Server = {}
 Server.__index = Server
 
@@ -129,7 +129,7 @@ local function new_connection(server, event)
 	return connection
 end
 
-function M.new(port)
+function threaded_tcp_server.new(port)
 	local server = setmetatable({
 		worker = Worker.new(WORKER_PATH),
 		port = port,
@@ -146,18 +146,34 @@ function M.new(port)
 end
 
 -- Publish once per immutable snapshot, before accepting join work. Never copy ZIPs per client.
+-- false when released archive bytes must be restored first
 function Server:set_snapshot(state)
-	if self.manifest_hash == state.manifest_hash then return end
+	if self.manifest_hash == state.manifest_hash then return true end
 	local bundles = {}
+	local sent = self.sent_archives or {}
+	local next_sent = {}
 	for _, bundle in ipairs(state.sync_bundles) do
-		local payload = string.pack(">I2", #bundle.id) .. bundle.id .. bundle.archive
-		self.worker:sendMessage(codec.encode(codec.CACHE_BUNDLE, 0, #bundle.archive, payload))
-		bundles[#bundles + 1] = { id = bundle.id, files = bundle.files, }
+		if not bundle.archive and sent[bundle.id] ~= bundle.archive_sha256 then
+			return false
+		end
 	end
+	for _, bundle in ipairs(state.sync_bundles) do
+		-- worker keeps the old cache, so unchanged archives aren't re-sent
+		if sent[bundle.id] ~= bundle.archive_sha256 then
+			local payload = string.pack(">I2", #bundle.id) .. bundle.id .. bundle.archive
+			self.worker:sendMessage(codec.encode(codec.CACHE_BUNDLE, 0, #bundle.archive, payload))
+		end
+		next_sent[bundle.id] = bundle.archive_sha256
+		bundles[#bundles + 1] = {
+			id = bundle.id, files = bundle.files, archive_sha256 = bundle.archive_sha256,
+		}
+	end
+	self.sent_archives = next_sent
 	self.worker:sendMessage(codec.encode(codec.SYNC_SNAPSHOT, 0, 0, json.encode({
 		manifest = state.manifest_hash, bundles = bundles,
 	})))
 	self.manifest_hash = state.manifest_hash
+	return true
 end
 
 function Server:poll()
@@ -180,6 +196,8 @@ function Server:poll()
 
 		if event.kind == codec.LISTENING then
 			self.is_listening = true
+		elseif event.kind == codec.SNAPSHOT_READY then
+			self.ready_manifest_hash = event.payload
 		elseif event.kind == codec.ACCEPTED then
 			local connection = new_connection(self, event)
 			self.connections[event.id] = connection
@@ -263,4 +281,4 @@ function Server:close()
 	self.accept_queue = {}
 end
 
-return M
+return threaded_tcp_server

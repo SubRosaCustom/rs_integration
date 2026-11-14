@@ -8,7 +8,7 @@ return function(state, src)
 	assert(state.hooks_registered)
 	assert(state.module_loaded)
 
-	assert(protocol.VERSION == 10)
+	assert(protocol.VERSION == 11)
 
 	assert(type(srcIntegrationNative) == "table")
 	assert(type(srcIntegrationNative.sendPacket) == "function")

@@ -1,4 +1,4 @@
-local M = {
+local threaded_tcp_codec = {
 	BIND = 1,
 	SEND = 2,
 	CLOSE = 3,
@@ -17,15 +17,16 @@ local M = {
 	ERROR = 21,
 	STREAM_DONE = 22,
 	SEND_STATS = 23,
+	SNAPSHOT_READY = 24, -- payload: manifest hash the worker has fully staged
 }
 
 local BINARY_MAGIC = "SRCB"
 
-function M.encode(kind, id, value, payload)
+function threaded_tcp_codec.encode(kind, id, value, payload)
 	return string.pack(">BI4I4", kind, id, value) .. (payload or "")
 end
 
-function M.decode(message)
+function threaded_tcp_codec.decode(message)
 	if type(message) ~= "string" or #message < 9 then
 		return nil, "invalid worker message"
 	end
@@ -39,12 +40,12 @@ function M.decode(message)
 	}
 end
 
-function M.encode_error(message)
+function threaded_tcp_codec.encode_error(message)
 	local payload = tostring(message):sub(1, 512)
-	return M.encode(M.ERROR, 0, #payload, payload)
+	return threaded_tcp_codec.encode(threaded_tcp_codec.ERROR, 0, #payload, payload)
 end
 
-function M.encode_binary_frame(frame_type, payload)
+function threaded_tcp_codec.encode_binary_frame(frame_type, payload)
 	if type(frame_type) ~= "string" or frame_type == "" then
 		return nil
 	end
@@ -56,4 +57,4 @@ function M.encode_binary_frame(frame_type, payload)
 	return string.pack(">c4I2I4", BINARY_MAGIC, #frame_type, #payload) .. frame_type .. payload
 end
 
-return M
+return threaded_tcp_codec

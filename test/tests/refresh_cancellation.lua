@@ -166,11 +166,13 @@ package.loaded["main.src.event_codec"] = {}
 package.loaded["main.src.udp_events"] = {
 	tick = function(client) client.udp_tick_called = true end,
 	reset_client = function() end,
+	unbind_endpoint = function() end,
 }
 local network = require("main.src.network")
 local clients = {}
 local state = { clients = clients, sync_generation = 3, runtime_id = "runtime",
-	manifest_hash = "new scope", config = { disallowedPaths = {}, disableClientTiremarks = true }, }
+	manifest_hash = "new scope", config = { disallowedPaths = {}, disableClientTiremarks = true },
+	tick = 100, refresh_notice_spread_ticks = 0, }
 local function add_client(hello, bound, open, valid)
 	local connection = { is_open = open, address = "127.0.0.1" }
 	function connection:discard_pending_sends(tail) self.discarded = true; self.tail = tail end
@@ -212,13 +214,67 @@ for _, connection in ipairs({ pending, bound }) do
 end
 assert(not raw.discarded and #raw_client.send_queue == 2)
 assert(not closed.discarded and not invalid.is_open)
-assert(require("main.src.protocol").VERSION == 10)
+assert(require("main.src.protocol").VERSION == 11)
 
 state.config.disableClientTiremarks = false
 network.refresh(state)
 for _, connection in ipairs({ pending, bound }) do
 	local message = json.decode(clients[connection].send_queue[1])
 	assert(message.payload.disableClientTiremarks == false)
+end
+
+-- spread window: reset is immediate, notices delayed
+state.refresh_notice_spread_ticks = 120
+for _, connection in ipairs({ pending, bound }) do clients[connection].send_queue = {} end
+network.refresh(state)
+local latest = state.tick
+for _, connection in ipairs({ pending, bound }) do
+	local client = clients[connection]
+	assert(connection.discarded and client.sync_state == "capable" and client.generation == state.sync_generation)
+	assert(client.pending_refresh_notice, "notice must be scheduled")
+	local due = client.pending_refresh_notice.due_tick
+	assert(due >= state.tick and due <= state.tick + 120)
+	latest = math.max(latest, due)
+end
+-- a client joining mid-spread isn't scheduled
+local late, late_client = add_client(true, false, true)
+assert(late_client.pending_refresh_notice == nil)
+network.send_due_refresh_notices(state)
+state.tick = latest
+network.send_due_refresh_notices(state)
+for _, connection in ipairs({ pending, bound }) do
+	local client = clients[connection]
+	assert(client.pending_refresh_notice == nil and #client.send_queue == 1)
+	local message = json.decode(client.send_queue[1])
+	assert(message.type == "REFRESH_NOTICE" and message.payload.syncGeneration == state.sync_generation)
+end
+assert(#late_client.send_queue == 2, "client that joined mid-spread must not get a stale notice")
+-- a second refresh replaces an undelivered notice
+for _, connection in ipairs({ pending, bound }) do clients[connection].send_queue = {} end
+network.refresh(state)
+network.refresh(state)
+state.tick = state.tick + 121
+network.send_due_refresh_notices(state)
+for _, connection in ipairs({ pending, bound }) do
+	assert(#clients[connection].send_queue == 1)
+	assert(json.decode(clients[connection].send_queue[1]).payload.syncGeneration == state.sync_generation)
+end
+
+-- a worker missing released bytes asks for them back
+do
+	local p = pair()
+	local snapshot_state = { manifest_hash = "m1", sync_bundles = {
+		{ id = "base", archive = "ZIP", archive_sha256 = "sha", files = {}, },
+	}, }
+	assert(p.server:set_snapshot(snapshot_state) == true)
+	assert(p.server:set_snapshot(snapshot_state) == true, "same manifest is a no-op")
+	p.event(codec.SNAPSHOT_READY, 0)
+	p.server:poll()
+	snapshot_state.manifest_hash = "m2"
+	snapshot_state.sync_bundles[1].archive = nil
+	assert(p.server:set_snapshot(snapshot_state) == true, "worker already holds the same archive")
+	local fresh = pair()
+	assert(fresh.server:set_snapshot(snapshot_state) == false)
 end
 
 print("refresh cancellation, TCP frame preservation, and tiremark policy checks passed")

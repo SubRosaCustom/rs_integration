@@ -31,8 +31,9 @@ This repository is the server half of SRC. It is not the native client mod, and 
 - SRC uses TCP for control/sync and reliable fragmented event datagrams through
   the game's existing UDP socket and port. Protocol 8 supports up to 256 KiB of
   encoded event arguments, selective retries and packet-size fallback. Both
-  client and server must upgrade together. See [the wire format and limits](docs/reliable_udp.md).
-- Server-owned reliable event IDs are allocated in the unsigned range `0x80000000` to `0xFFFFFFFF` to avoid client/server ID collisions.
+  client and server must upgrade together.
+- Server-owned reliable event IDs are allocated per client connection in the unsigned range `0x80000000` to `0xFFFFFFFF` (restarting at `0x80000000` for each session) to avoid client/server ID collisions.
+- Hot reload only works between builds that share the current runtime-state layout. `main/src/runtime_state.lua` no longer migrates the camelCase state, client, or TCP-server fields kept by builds older than this change, so restart RosaServer instead of hot-reloading when upgrading from such a build.
 - `plugins/srcutils.lua` exposes `/srcwatch`, `/srcdisableplugin`, `/srcenableplugin`, `/srcreloadplugin`, and supports `srcwatch` as an alias.
   `/srcreloadplugin` accepts a synced client plugin file name.
 - Internal Lua helpers in this repo are now normalized to `snake_case`; API-facing names are preserved for compatibility with existing configs/plugins.
@@ -41,13 +42,13 @@ This repository is the server half of SRC. It is not the native client mod, and 
 ## Project Layout
 
 - `main/src/init.lua` installs the SRC runtime into the server
-- `main/src/network.lua` owns the protocol and connection lifecycle
+- `main/src/network.lua` is the entry for the protocol and connection lifecycle; it composes `network_session.lua` (client binding, send queue), `network_handshake.lua` (TCP frame handlers), `network_transfer.lua` (file/bundle streaming), `network_events.lua` (UDP event dispatch) and `network_sync_payload.lua` (custom type sync frames)
 - `main/src/config.lua` resolves SRC configuration
 - `main/src/runtime_state.lua` owns reload-persistent runtime state
 - `main/src/sync_paths.lua` validates and resolves synchronized paths
 - `main/src/sync_snapshot.lua` builds synchronized file and bundle snapshots
 - `main/src/item_types.lua` owns custom item type sync helpers
-- `main/src/watcher.lua` owns the watcher helper used by SRC utility plugins
+- `main/src/watcher.lua` owns the watcher helper used by SRC utility plugins (inotify-driven; a full tree rescan runs only on structure events, watcher errors, and every 30 s as a safety net)
 - `plugins/srcutils.lua` owns `/srcrefresh`, `/srcstatus`, `/srcclients`, `/srcwatch`, `/srcdisableplugin`, `/srcenableplugin`, `/srcreloadplugin`, `/srcdumpstate`, and `/srckicknonsrc`
 - `plugins/srccShowcase.lua` is an example server plugin
 
@@ -73,7 +74,7 @@ Common settings include:
 - auto-refresh settings
 - event retry/timeout settings
 
-For example, set `config.src.disableClientTiremarks = true` in the server Lua config. The setting is sent in `HELLO_ACK`, `INDEX_RES`, and `REFRESH_NOTICE`. Reload the server configuration and use the normal sync refresh flow to apply changes to connected clients. Clearing it restores each client's local preference; it does not force tiremarks on. The restriction survives a temporary sync reconnect and is cleared when the server session ends. Updated clients treat an absent field as `false`; older clients ignore the field and cannot enforce it. No protocol version bump is required for this optional field.
+For example, set `config.src.disableClientTiremarks = true` in the server Lua config. The setting is sent in `HELLO_ACK`, `INDEX_RES`, and `REFRESH_NOTICE`. Reload the server configuration and use the normal sync refresh flow to apply changes to connected clients. Refreshes whose synced content is unchanged notify no one (`src.refresh()`, `src.refreshSyncFiles()` and `src.reloadClientPlugin()` all check the manifest hash; config reloads still force a notice), and notices are spread over about 3 seconds. Clearing it restores each client's local preference; it does not force tiremarks on. The restriction survives a temporary sync reconnect and is cleared when the server session ends. Clients treat an absent field as `false`.
 
 `clientRoot` is the server-side directory tree that gets indexed and synced to SRC clients.
 
@@ -81,6 +82,8 @@ Current layout under `clientRoot`:
 
 - `scripts/` contains synced Lua, YAML, and JSON script/runtime files
 - `assets/` contains synced client assets such as `.cmo`, `.png`, `.wav`, `.csx`, `.sbc`, and `.sbl`
+
+A flat `clientRoot` (scripts directly under `clientRoot` instead of `clientRoot/scripts`) is no longer indexed; move such files into `scripts/`.
 
 Logical sync paths stay clean:
 

@@ -11,7 +11,7 @@ for _, path in ipairs({ "../head.cmo", "/data/head.cmo", "data\\head.cmo", "C:/d
 end
 assert(not pcall(config.resolve, { disallowedPaths = { [1] = "data/a", [3] = "data/b" } }))
 assert(not pcall(config.resolve, { disallowedPaths = { key = "data/a" } }))
-assert(require("main.src.protocol").VERSION == 10)
+assert(require("main.src.protocol").VERSION == 11)
 
 assert(config.resolve(nil).disableClientTiremarks == false)
 assert(config.resolve({}).disableClientTiremarks == false)

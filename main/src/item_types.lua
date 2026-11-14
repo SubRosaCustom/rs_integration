@@ -1,7 +1,7 @@
 local log = require("main.src.log")
 local sync_paths = require("main.src.sync_paths")
 
-local M = {}
+local item_types = {}
 
 local PROTOCOL_VERSION = 1
 local ITEM_TYPE_SIZE = 0x13D0
@@ -41,29 +41,6 @@ local function normalize_index(index, minimum, maximum)
 	return index
 end
 
-local function has_memory_read_api()
-	return type(memory) == "table"
-		and type(memory.getAddress) == "function"
-		and type(memory.readBytes) == "function"
-end
-
-local function has_memory_write_api()
-	return has_memory_read_api() and type(memory.writeBytes) == "function"
-end
-
-local function get_native_item_type_api()
-	if type(srcIntegrationNative) ~= "table" then
-		return nil
-	end
-
-	if type(srcIntegrationNative.loadITM) ~= "function"
-		or type(srcIntegrationNative.loadIT3) ~= "function" then
-		return nil
-	end
-
-	return srcIntegrationNative
-end
-
 local function is_item_type_userdata(value)
 	return type(value) == "userdata" and safe_read(value, "class") == "ItemType"
 end
@@ -97,10 +74,6 @@ local function get_item_type_index(ref)
 end
 
 local function get_item_type_address(item_type)
-	if not has_memory_read_api() then
-		return nil, "memory read api unavailable"
-	end
-
 	local address_ok, address = pcall(memory.getAddress, item_type)
 	if not address_ok or type(address) ~= "number" or address <= 0 then
 		return nil, ("failed to resolve item type address (%s)").format(tostring(address))
@@ -110,10 +83,6 @@ local function get_item_type_address(item_type)
 end
 
 local function read_item_type_bytes_from_address(address)
-	if not has_memory_read_api() then
-		return nil, "memory read api unavailable"
-	end
-
 	local bytes_ok, bytes_or_error = pcall(memory.readBytes, address, ITEM_TYPE_SIZE)
 	if not bytes_ok then
 		return nil, tostring(bytes_or_error)
@@ -127,10 +96,6 @@ local function read_item_type_bytes_from_address(address)
 end
 
 local function write_item_type_bytes(address, bytes)
-	if not has_memory_write_api() then
-		return false, "memory write api unavailable"
-	end
-
 	local write_ok, write_error = pcall(memory.writeBytes, address, bytes)
 	if not write_ok then
 		return false, tostring(write_error)
@@ -148,7 +113,7 @@ local function resolve_item_type(ref)
 		return get_item_type_by_index(ref)
 	end
 
-	if type(ref) == "string" and ref ~= "" and type(itemTypes.getByName) == "function" then
+	if type(ref) == "string" and ref ~= "" then
 		local ok, item_type = pcall(itemTypes.getByName, ref)
 		if ok then
 			return item_type
@@ -261,7 +226,7 @@ local function has_active_item_assets(state, index)
 	return true
 end
 
-function M.build_sync_payload(state)
+function item_types.build_sync_payload(state)
 	local entries_by_index = state.custom_item_types_by_index or {}
 	local item_type_entries = {}
 
@@ -328,7 +293,7 @@ local function emit_sync_payload(src, payload, player)
 end
 
 local function broadcast_custom_item_types(state, src)
-	local payload = M.build_sync_payload(state)
+	local payload = item_types.build_sync_payload(state)
 	if payload then
 		emit_sync_payload(src, payload, nil)
 	end
@@ -359,7 +324,6 @@ local function snapshot_custom_item_type(state, target_type, source_index)
 	end
 
 	state.item_type_sync_memory_warning_shown = false
-	state.custom_item_types_by_index = state.custom_item_types_by_index or {}
 	state.custom_item_types_by_index[target_index] = {
 		index = target_index,
 		sourceIndex = source_index,
@@ -408,8 +372,6 @@ local function new_item_type(state, src, name, fields)
 	local num_hands = fields.numHands == nil and 1 or fields.numHands
 	assert(type(num_hands) == "number" and num_hands % 1 == 0 and num_hands >= 0 and num_hands <= 2,
 		"itemTypes.new: numHands must be an integer in 0..2")
-	assert(has_memory_write_api() and type(memory.writeFloat) == "function"
-		and type(memory.writeInt) == "function", "itemTypes.new: memory write API unavailable")
 	local grip_source = assert(get_item_type_by_index(25), "itemTypes.new: stock grip reference unavailable")
 	local grip_address, grip_error = get_item_type_address(grip_source)
 	assert(grip_address, "itemTypes.new: " .. tostring(grip_error))
@@ -535,11 +497,9 @@ local function run_init_item_type_hook(state, src)
 	end
 	state.item_type_init_hook_ran = true
 
-	if type(hook) == "table" and type(hook.run) == "function" then
-		local ok, run_error = pcall(hook.run, "SRC_InitItemType")
-		if not ok then
-			log.warn("SRC_InitItemType failed: %s", tostring(run_error))
-		end
+	local ok, run_error = pcall(hook.run, "SRC_InitItemType")
+	if not ok then
+		log.warn("SRC_InitItemType failed: %s", tostring(run_error))
 	end
 
 	broadcast_custom_item_types(state, src)
@@ -620,6 +580,8 @@ local function normalize_item_type_file(state, path, extension, label)
 	assert(trimmed ~= "", "src.setItemType" .. label .. ": path must be a non-empty string")
 	assert(not trimmed:find("\\", 1, true), "src.setItemType" .. label .. ": use forward slash paths")
 	assert(string.lower(trimmed):match("%" .. extension .. "$"), "src.setItemType" .. label .. ": path must end with " .. extension)
+	-- raw path is also tried relative to the cwd and advertised
+	assert(sync_paths.is_safe_asset(trimmed), "src.setItemType" .. label .. ": unsafe path " .. trimmed)
 
 	-- Scoped owners keep the logical client path separate from the server file.
 	local asset = state.asset_files_by_path and state.asset_files_by_path[trimmed]
@@ -641,9 +603,6 @@ local function normalize_item_type_file(state, path, extension, label)
 end
 
 local function apply_native_item_type_file(state, target_index, file_path, loader_name)
-	local native_api = get_native_item_type_api()
-	assert(native_api ~= nil, "src.setItemType" .. loader_name .. ": srcIntegrationNative item model helpers unavailable")
-
 	local target_type = get_item_type_by_index(target_index)
 	assert(target_type ~= nil, "src.setItemType" .. loader_name .. ": failed to resolve item type at index " .. tostring(target_index))
 	if not state.item_type_native_file_loaded[target_index] then
@@ -655,7 +614,7 @@ local function apply_native_item_type_file(state, target_index, file_path, loade
 		end
 	end
 
-	native_api["load" .. loader_name](target_index, file_path)
+	srcIntegrationNative["load" .. loader_name](target_index, file_path)
 	state.item_type_native_file_loaded[target_index] = true
 	local existing_entry = state.custom_item_types_by_index and state.custom_item_types_by_index[target_index]
 	local source_index = type(existing_entry) == "table" and existing_entry.sourceIndex or target_index
@@ -663,9 +622,13 @@ local function apply_native_item_type_file(state, target_index, file_path, loade
 		"src.setItemType" .. loader_name .. ": failed to snapshot item type after native load")
 end
 
-function M.install(state, src, force)
+local function clear_custom_item_type_slots()
+	srcIntegrationNative.clearCustomItemTypeSlots()
+end
+
+function item_types.install(state, src)
 	local was_installed = state.item_types_api_installed
-	if was_installed and not force then
+	if was_installed then
 		return
 	end
 
@@ -674,15 +637,7 @@ function M.install(state, src, force)
 		return
 	end
 
-	state.custom_item_types_by_index = state.custom_item_types_by_index or {}
-	state.next_custom_item_type_index = state.next_custom_item_type_index or FIRST_CUSTOM_INDEX
-	state.item_type_model_assignments = state.item_type_model_assignments or {}
-	state.item_type_icon_assignments = state.item_type_icon_assignments or {}
-	state.item_type_itm_assignments = state.item_type_itm_assignments or {}
-	state.item_type_it3_assignments = state.item_type_it3_assignments or {}
-	state.item_type_native_file_loaded = state.item_type_native_file_loaded or {}
-	state.item_type_texture_assignments = state.item_type_texture_assignments or {}
-	state.item_type_fire_sound_assignments = state.item_type_fire_sound_assignments or {}
+	clear_custom_item_type_slots()
 
 	itemTypes.new = function(name, fields)
 		return new_item_type(state, src, name, fields)
@@ -693,9 +648,9 @@ function M.install(state, src, force)
 	itemTypes.create = nil
 
 	if type(src) == "table" then
-		if force or type(src.syncCustomItemTypes) ~= "function" then
+		if type(src.syncCustomItemTypes) ~= "function" then
 			src.syncCustomItemTypes = function(player)
-				local payload = M.build_sync_payload(state)
+				local payload = item_types.build_sync_payload(state)
 				if not payload then
 					return false
 				end
@@ -703,7 +658,7 @@ function M.install(state, src, force)
 			end
 		end
 
-		if force or type(src.setItemTypeModel) ~= "function" then
+		if type(src.setItemTypeModel) ~= "function" then
 			src.setItemTypeModel = function(index_or_type, model_name, player)
 				local target_index = get_item_type_index(index_or_type)
 				assert(type(target_index) == "number",
@@ -720,13 +675,13 @@ function M.install(state, src, force)
 				state.item_type_itm_assignments[target_index] = nil
 				state.item_type_it3_assignments[target_index] = nil
 				state.item_type_model_assignments[target_index] = model_name
-				local network = require("main.src.network")
 				src.syncCustomItemTypes(player)
-				return network.send_item_type_model(state, player, target_index, model_name)
+				local network_sync_payload = require("main.src.network_sync_payload")
+				return network_sync_payload.send_item_type_model(state, player, target_index, model_name)
 			end
 		end
 
-		if force or type(src.setItemTypeIcon) ~= "function" then
+		if type(src.setItemTypeIcon) ~= "function" then
 			src.setItemTypeIcon = function(index_or_type, icon_path, player)
 				local target_index = get_item_type_index(index_or_type)
 				assert(type(target_index) == "number",
@@ -741,13 +696,13 @@ function M.install(state, src, force)
 				end
 
 				state.item_type_icon_assignments[target_index] = icon_path
-				local network = require("main.src.network")
 				src.syncCustomItemTypes(player)
-				return network.send_item_type_icon(state, player, target_index, icon_path)
+				local network_sync_payload = require("main.src.network_sync_payload")
+				return network_sync_payload.send_item_type_icon(state, player, target_index, icon_path)
 			end
 		end
 
-		if force or type(src.setItemTypeITM) ~= "function" then
+		if type(src.setItemTypeITM) ~= "function" then
 			src.setItemTypeITM = function(index_or_type, itm_path, player)
 				local target_index = get_item_type_index(index_or_type)
 				assert(type(target_index) == "number",
@@ -763,13 +718,13 @@ function M.install(state, src, force)
 				state.item_type_model_assignments[target_index] = nil
 				state.item_type_it3_assignments[target_index] = nil
 				state.item_type_itm_assignments[target_index] = sync_path
-				local network = require("main.src.network")
 				src.syncCustomItemTypes(player)
-				return network.send_item_type_itm(state, player, target_index, sync_path)
+				local network_sync_payload = require("main.src.network_sync_payload")
+				return network_sync_payload.send_item_type_itm(state, player, target_index, sync_path)
 			end
 		end
 
-		if force or type(src.setItemTypeIT3) ~= "function" then
+		if type(src.setItemTypeIT3) ~= "function" then
 			src.setItemTypeIT3 = function(index_or_type, it3_path, player)
 				local target_index = get_item_type_index(index_or_type)
 				assert(type(target_index) == "number",
@@ -785,13 +740,13 @@ function M.install(state, src, force)
 				state.item_type_model_assignments[target_index] = nil
 				state.item_type_itm_assignments[target_index] = nil
 				state.item_type_it3_assignments[target_index] = sync_path
-				local network = require("main.src.network")
 				src.syncCustomItemTypes(player)
-				return network.send_item_type_it3(state, player, target_index, sync_path)
+				local network_sync_payload = require("main.src.network_sync_payload")
+				return network_sync_payload.send_item_type_it3(state, player, target_index, sync_path)
 			end
 		end
 
-		if force or type(src.setItemTypeTexture) ~= "function" then
+		if type(src.setItemTypeTexture) ~= "function" then
 			src.setItemTypeTexture = function(index_or_type, texture_ref, player)
 				local target_index = get_item_type_index(index_or_type)
 				assert(type(target_index) == "number",
@@ -807,13 +762,13 @@ function M.install(state, src, force)
 				local normalized_texture = normalize_texture_assignment(texture_ref)
 				state.item_type_texture_assignments[target_index] = normalized_texture
 
-				local network = require("main.src.network")
 				src.syncCustomItemTypes(player)
-				return network.send_item_type_texture(state, player, target_index, normalized_texture)
+				local network_sync_payload = require("main.src.network_sync_payload")
+				return network_sync_payload.send_item_type_texture(state, player, target_index, normalized_texture)
 			end
 		end
 
-		if force or type(src.setItemTypeFireSounds) ~= "function" then
+		if type(src.setItemTypeFireSounds) ~= "function" then
 			src.setItemTypeFireSounds = function(index_or_type, sound_paths, player)
 				local target_index = get_item_type_index(index_or_type)
 				assert(type(target_index) == "number",
@@ -831,35 +786,26 @@ function M.install(state, src, force)
 				local normalized_sound_paths = normalize_fire_sound_paths(sound_paths)
 				state.item_type_fire_sound_assignments[target_index] = normalized_sound_paths
 
-				local network = require("main.src.network")
 				src.syncCustomItemTypes(player)
-				return network.send_item_type_fire_sounds(state, player, target_index, normalized_sound_paths)
+				local network_sync_payload = require("main.src.network_sync_payload")
+				return network_sync_payload.send_item_type_fire_sounds(state, player, target_index, normalized_sound_paths)
 			end
 		end
 	end
 
 	local function schedule_init_hook()
-		if type(hook) == "table" and type(hook.once) == "function" then
-			hook.once("Logic", function()
-				run_init_item_type_hook(state, src)
-			end)
-			return
-		end
-
-		run_init_item_type_hook(state, src)
-	end
-
-	if type(hook) == "table" and type(hook.add) == "function" then
-		hook.add("ConfigLoaded", "main.src.itemTypes.init", function()
-			schedule_init_hook()
+		hook.once("Logic", function()
+			run_init_item_type_hook(state, src)
 		end)
-		schedule_init_hook()
-	else
-		run_init_item_type_hook(state, src)
 	end
+
+	hook.add("ConfigLoaded", "main.src.itemTypes.init", function()
+		schedule_init_hook()
+	end)
+	schedule_init_hook()
 
 	state.item_types_api_installed = true
 	log.info("itemTypes.clone API installed")
 end
 
-return M
+return item_types

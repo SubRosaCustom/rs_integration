@@ -1,5 +1,6 @@
 local event_codec = require("main.src.event_codec")
 local network = require("main.src.network")
+local network_events = require("main.src.network_events")
 local udp_events = require("main.src.udp_events")
 
 local function read_file(path)
@@ -75,6 +76,8 @@ return function(state, src)
 		},
 	}
 	state.clients[connection] = client
+	udp_events.set_token(state, connection, client, token)
+	udp_events.bind_endpoint(state, connection, client)
 	udp_events.tick(client, state.config)
 	local udp_reliable = client.udp_reliable
 
@@ -114,7 +117,7 @@ return function(state, src)
 	end))
 
 	local event_hash = assert(udp_events.hash_event_name("test.loopback"))
-	local args = assert(event_codec.encode_args("payload"))
+	local args = assert(event_codec.encode("payload"))
 	local message = assert(udp_events.encode_reliable_event(event_hash, 7, args))
 	local batch = string.pack(">BBI4I2I4I2I2", 1, 1, 7, 1, #message, 488, 0) .. message
 	local datagram = string.pack(">c4c4BBc32I2", "7DFP", "SRCU", 2, 0, token, #batch) .. batch
@@ -164,7 +167,7 @@ return function(state, src)
 		assert(client.udp_reliable)
 
 		client.player.connection = nil
-		network.on_udp_datagram(state, {
+		network_events.on_udp_datagram(state, {
 			connection = connection,
 			client = client,
 			messages = {
