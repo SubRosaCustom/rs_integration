@@ -9,6 +9,8 @@
 ---@field enabled boolean Defaults to true.
 ---@field disallowNonSRCPlayers boolean Defaults to false; enforces SRC admission after the grace period.
 ---@field disableClientTiremarks boolean Defaults to false; disables SRC tiremarks for this server session, overriding the local preference.
+---@field disableDiscordJoin boolean Defaults to false; stops clients from publishing a Discord join button or invite for this server session.
+---@field hideDiscordDetails boolean Defaults to false; hides this server's name, mode, map, and player count from clients' Discord presence for this server session.
 ---@field clientRoot string Defaults to "subrosacustom". Scripts and selected mode/plugin asset owners live here.
 ---@field disallowedPaths string[] Exact game-root-relative paths that local resource packs cannot replace. Empty clears the policy; no glob or prefix matching. Maximum 4096 input entries.
 ---@field motd string Browser text, truncated to 160 bytes. Defaults to an empty string.

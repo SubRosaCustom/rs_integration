@@ -124,6 +124,7 @@ function reliable_udp.enqueue(peer, kind, id, bytes)
 	}
 	init_outbound_pieces(peer, transfer, math.ceil(#bytes / chunk))
 	peer.outbound[transfer_key] = transfer
+	peer.outbound_deadline = math.min(peer.outbound_deadline or math.huge, peer.now)
 	table.insert(peer.order, order_search(peer.order, transfer_key), transfer_key)
 	add_bytes(peer, #bytes)
 	return true
@@ -149,23 +150,37 @@ function reliable_udp.advance(peer, now, active)
 	end
 	peer.wall = now
 	peer.active = active
-	for transfer_key, completed in pairs(peer.completed) do
-		if completed.expiry <= peer.now then
-			local kind = math.floor(transfer_key / 4294967296)
-			peer.retired[kind] = math.max(peer.retired[kind] or 0, transfer_key % 4294967296)
-			peer.acks[transfer_key] = nil
-			peer.completed[transfer_key] = nil
-			peer.completed_count = peer.completed_count - 1
+	while peer.completed_head and peer.completed_head.expiry <= peer.now do
+		local entry = peer.completed_head
+		local transfer_key = entry.key
+		local kind = math.floor(transfer_key / 4294967296)
+		peer.retired[kind] = math.max(peer.retired[kind] or 0, transfer_key % 4294967296)
+		peer.acks[transfer_key] = nil
+		peer.completed[transfer_key] = nil
+		peer.completed_count = peer.completed_count - 1
+		peer.completed_head = entry.next
+	end
+	if not peer.completed_head then
+		peer.completed_tail = nil
+	end
+	if peer.inbound_deadline and peer.now - peer.inbound_deadline >= LIFETIME then
+		peer.inbound_deadline = nil
+		for _, transfer in pairs(peer.inbound) do
+			local deadline = transfer.created
+			if peer.now - deadline >= LIFETIME then
+				fail(peer, "UDP reassembly expired; session must be reset")
+			end
+			peer.inbound_deadline = math.min(peer.inbound_deadline or math.huge, deadline)
 		end
 	end
-	for _, transfer in pairs(peer.inbound) do
-		if peer.now - transfer.created >= LIFETIME then
-			fail(peer, "UDP reassembly expired; session must be reset")
-		end
-	end
-	for _, transfer in pairs(peer.outbound) do
-		if peer.now - transfer.created >= LIFETIME then
-			fail(peer, "UDP delivery deadline exceeded; receipt is uncertain")
+	if peer.outbound_deadline and peer.now - peer.outbound_deadline >= LIFETIME then
+		peer.outbound_deadline = nil
+		for _, transfer in pairs(peer.outbound) do
+			local deadline = transfer.created
+			if peer.now - deadline >= LIFETIME then
+				fail(peer, "UDP delivery deadline exceeded; receipt is uncertain")
+			end
+			peer.outbound_deadline = math.min(peer.outbound_deadline or math.huge, deadline)
 		end
 	end
 end
@@ -496,6 +511,7 @@ function reliable_udp.receive(peer, packet, available_bytes)
 			transfer.bit_chars[i] = "\0"
 		end
 		peer.inbound[transfer_key] = transfer
+		peer.inbound_deadline = math.min(peer.inbound_deadline or math.huge, peer.now)
 		add_bytes(peer, total)
 	end
 	if transfer.total ~= total or transfer.chunk ~= chunk then
@@ -534,10 +550,15 @@ function reliable_udp.accept(peer, kind, id)
 		return false
 	end
 	ack(peer, kind, id, transfer.generation, #transfer.pieces, true)
-	if not peer.completed[transfer_key] then
-		peer.completed_count = peer.completed_count + 1
+	peer.completed_count = peer.completed_count + 1
+	local completed = { total = transfer.total, expiry = peer.now + RETENTION, key = transfer_key, }
+	peer.completed[transfer_key] = completed
+	if peer.completed_tail then
+		peer.completed_tail.next = completed
+	else
+		peer.completed_head = completed
 	end
-	peer.completed[transfer_key] = { total = transfer.total, expiry = peer.now + RETENTION, }
+	peer.completed_tail = completed
 	add_bytes(peer, -transfer.total)
 	peer.inbound[transfer_key] = nil
 	return true

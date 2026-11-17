@@ -29,6 +29,8 @@ local function build(state)
 			bundles = bundle_metadata_list(state),
 			disallowedPaths = state.config.disallowedPaths,
 			disableClientTiremarks = state.config.disableClientTiremarks == true,
+			disableDiscordJoin = state.config.disableDiscordJoin == true,
+			hideDiscordDetails = state.config.hideDiscordDetails == true,
 			loadedLevel = state.loaded_level,
 			persistentMode = state.persistent_mode,
 			runtimeID = state.runtime_id,
@@ -47,6 +49,8 @@ function index_response.bytes(state)
 		and cache.sync_bundles == state.sync_bundles
 		and cache.disallowed_paths == config.disallowedPaths
 		and cache.tiremarks == config.disableClientTiremarks
+		and cache.discord_join == config.disableDiscordJoin
+		and cache.discord_details == config.hideDiscordDetails
 		and cache.loaded_level == state.loaded_level
 		and cache.persistent_mode == state.persistent_mode
 		and cache.runtime_id == state.runtime_id
@@ -60,6 +64,8 @@ function index_response.bytes(state)
 		sync_bundles = state.sync_bundles,
 		disallowed_paths = config.disallowedPaths,
 		tiremarks = config.disableClientTiremarks,
+		discord_join = config.disableDiscordJoin,
+		discord_details = config.hideDiscordDetails,
 		loaded_level = state.loaded_level,
 		persistent_mode = state.persistent_mode,
 		runtime_id = state.runtime_id,

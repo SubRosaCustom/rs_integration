@@ -15,6 +15,11 @@ local TYPE_BINARY = 6
 local FNV64_OFFSET_HI = 0xCBF29CE4
 local FNV64_OFFSET_LO = 0x84222325
 local FNV64_SHIFTS = { 0, 1, 4, 5, 7, 8, 40 }
+local HASH_CACHE_CAPACITY = 256
+local HASH_CACHE_MAX_NAME_BYTES = 256
+local hash_cache = {}
+local hash_cache_names = {}
+local hash_cache_next = 1
 
 local bxor = bit32.bxor
 local band = bit32.band
@@ -365,6 +370,11 @@ function event_codec.hash_name(name)
 		return nil
 	end
 
+	local cached = hash_cache[name]
+	if cached then
+		return cached
+	end
+
 	local hi = FNV64_OFFSET_HI
 	local lo = FNV64_OFFSET_LO
 	for i = 1, #name do
@@ -372,7 +382,17 @@ function event_codec.hash_name(name)
 		hi, lo = multiply_fnv_prime(hi, lo)
 	end
 
-	return pack_u32(hi) .. pack_u32(lo)
+	local hash = pack_u32(hi) .. pack_u32(lo)
+	if #name <= HASH_CACHE_MAX_NAME_BYTES then
+		local previous = hash_cache_names[hash_cache_next]
+		if previous then
+			hash_cache[previous] = nil
+		end
+		hash_cache[name] = hash
+		hash_cache_names[hash_cache_next] = name
+		hash_cache_next = hash_cache_next % HASH_CACHE_CAPACITY + 1
+	end
+	return hash
 end
 
 function event_codec.hex(hash_bytes)

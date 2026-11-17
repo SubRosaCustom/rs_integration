@@ -50,6 +50,8 @@ config.DEFAULTS = {
 	enabled = true,
 	disallowNonSRCPlayers = false,
 	disableClientTiremarks = false,
+	disableDiscordJoin = false,
+	hideDiscordDetails = false,
 	disallowedPaths = {},
 	clientRoot = "subrosacustom",
 	motd = "",
@@ -107,6 +109,14 @@ function config.resolve(raw)
 
 	if type(raw.disableClientTiremarks) == "boolean" then
 		resolved.disableClientTiremarks = raw.disableClientTiremarks
+	end
+
+	if type(raw.disableDiscordJoin) == "boolean" then
+		resolved.disableDiscordJoin = raw.disableDiscordJoin
+	end
+
+	if type(raw.hideDiscordDetails) == "boolean" then
+		resolved.hideDiscordDetails = raw.hideDiscordDetails
 	end
 
 	if raw.disallowedPaths ~= nil then

@@ -258,3 +258,54 @@ do
 	assert(sender.bytes == 0 and reliable.total_bytes() == before)
 end
 print("Lua UDP incremental ack bitmaps, ordered scheduling and global byte counter passed")
+
+-- Completion retention uses active time and removes only due entries.
+do
+	local sink = reliable.new()
+	local function frame(kind, id)
+		return string.pack(">BBI4I2I4I2I2", 1, kind, id, 1, 18, 488, 0) .. payload(18)
+	end
+	local first, second = frame(1, 5), frame(3, 9)
+	reliable.advance(sink, 0, true)
+	assert(#reliable.receive(sink, first) == 1 and reliable.accept(sink, 1, 5))
+	assert(not reliable.accept(sink, 1, 5))
+	reliable.advance(sink, 10, true)
+	assert(#reliable.receive(sink, second) == 1 and reliable.accept(sink, 3, 9))
+	reliable.advance(sink, 20, false)
+	reliable.advance(sink, 1000, true)
+	reliable.advance(sink, 1219, true)
+	assert(sink.completed_count == 2 and #reliable.receive(sink, first) == 0)
+	reliable.advance(sink, 1220, true)
+	assert(sink.completed_count == 1 and sink.retired[1] == 5 and not sink.retired[3])
+	assert(sink.acks[4294967296 + 5] == nil)
+	assert(#reliable.receive(sink, second) == 0 and not sink.error)
+	reliable.advance(sink, 1230, true)
+	assert(sink.completed_count == 0 and sink.retired[3] == 9)
+	assert(not sink.completed_head and not sink.completed_tail and not next(sink.completed))
+	assert(#reliable.receive(sink, first) == 0 and sink.error)
+end
+
+-- Removed transfers leave stale deadline hints that must not expire newer work.
+do
+	local sender, sink = reliable.new(), reliable.new()
+	reliable.advance(sender, 0, true)
+	reliable.advance(sink, 0, true)
+	local first = string.pack(">BBI4I2I4I2I2", 1, 1, 1, 1, 18, 488, 0) .. payload(18)
+	assert(#reliable.receive(sink, first) == 1 and reliable.accept(sink, 1, 1))
+	assert(reliable.enqueue(sender, 1, 1, payload(18)))
+	reliable.receive(sender, assert(reliable.next(sink)))
+	assert(#reliable.take_receipts(sender) == 1)
+	reliable.advance(sender, 10, true)
+	reliable.advance(sink, 10, true)
+	assert(reliable.enqueue(sender, 1, 2, payload(18)))
+	local partial = string.pack(">BBI4I2I4I2I2", 1, 1, 2, 1, 489, 488, 0) .. payload(488)
+	assert(#reliable.receive(sink, partial) == 0)
+	reliable.advance(sender, 120, true)
+	reliable.advance(sink, 120, true)
+	assert(not sender.error and not sink.error)
+	reliable.advance(sender, 130, true)
+	reliable.advance(sink, 130, true)
+	assert(sender.error == "UDP delivery deadline exceeded; receipt is uncertain")
+	assert(sink.error == "UDP reassembly expired; session must be reset")
+end
+print("Lua UDP ordered retention, paused clock and deadline checks passed")

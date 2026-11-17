@@ -67,6 +67,8 @@ Common settings include:
 - `clientRoot`
 - `disallowNonSRCPlayers`
 - `disableClientTiremarks` (boolean, defaults to `false`; `true` disables SRC tiremarks for connected clients, overriding their local preference)
+- `disableDiscordJoin` (boolean, defaults to `false`; `true` stops connected clients from publishing a Discord join button or invite for this server)
+- `hideDiscordDetails` (boolean, defaults to `false`; `true` stops connected clients from showing this server's name, mode, map, and player count in Discord presence)
 - `motd` (up to 160 bytes, rendered with the base game's single-byte font atlas when an SRC server is hovered)
 - `motdIcon` (path to an exact 32x32 PNG smaller than 5 KiB; relative paths use the server's working directory)
 - file transfer limits
@@ -75,6 +77,8 @@ Common settings include:
 - event retry/timeout settings
 
 For example, set `config.src.disableClientTiremarks = true` in the server Lua config. The setting is sent in `HELLO_ACK`, `INDEX_RES`, and `REFRESH_NOTICE`. Reload the server configuration and use the normal sync refresh flow to apply changes to connected clients. Refreshes whose synced content is unchanged notify no one (`src.refresh()`, `src.refreshSyncFiles()` and `src.reloadClientPlugin()` all check the manifest hash; config reloads still force a notice), and notices are spread over about 3 seconds. Clearing it restores each client's local preference; it does not force tiremarks on. The restriction survives a temporary sync reconnect and is cleared when the server session ends. Clients treat an absent field as `false`.
+
+`disableDiscordJoin` and `hideDiscordDetails` travel the same way (`HELLO_ACK`, `INDEX_RES`, `REFRESH_NOTICE`), are cleared when the server session ends, and can only restrict a client's own Discord settings, never enable them. Clients publish only a hash of the server's `ip:port` as the join secret, and servers that are not SRC-enabled always show generic presence.
 
 `clientRoot` is the server-side directory tree that gets indexed and synced to SRC clients.
 

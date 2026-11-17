@@ -343,9 +343,26 @@ local function find_client_for_game_endpoint(state, address, port)
 	return nil, nil
 end
 
+function udp_events.resolve_send_endpoint(state, address, port)
+	local normalized_port = normalize_port(port)
+	local normalized_address = tostring(address)
+	local index = state and state.clients_by_endpoint
+	local connection = normalized_port and index and index[normalized_address .. ":" .. normalized_port]
+	local client = connection and state.clients[connection]
+	if not client or not client.bound then
+		connection, client = nil, nil
+	end
+	return { connection = connection, client = client, address = normalized_address, port = normalized_port, }
+end
+
 -- game endpoint belongs to a bound client with an open TCP connection
-function udp_events.has_bound_client(state, address, port)
-	local connection = find_client_for_game_endpoint(state, address, port)
+function udp_events.has_bound_client(state, address, port, endpoint)
+	local connection
+	if endpoint then
+		connection = endpoint.connection
+	else
+		connection = find_client_for_game_endpoint(state, address, port)
+	end
 	return connection ~= nil and connection.is_open == true
 end
 
@@ -359,8 +376,9 @@ local function find_client_for_datagram(state, token, address)
 	return nil, nil
 end
 
-function udp_events.on_send_packet(state, address, port)
-	local _, client = find_client_for_game_endpoint(state, address, port)
+function udp_events.on_send_packet(state, address, port, endpoint)
+	endpoint = endpoint or udp_events.resolve_send_endpoint(state, address, port)
+	local client = endpoint.client
 	if not client or client.udp_events_ready ~= true then
 		return
 	end
@@ -373,7 +391,7 @@ function udp_events.on_send_packet(state, address, port)
 			udp_events.warn_limited(client, "udp_build_failed", "failed to build UDP datagram: %s", tostring(encode_error))
 			break
 		end
-		local sent = srcIntegrationNative.sendPacket(tostring(address), normalize_port(port), datagram)
+		local sent = srcIntegrationNative.sendPacket(endpoint.address, endpoint.port, datagram)
 		if sent ~= #datagram then
 			udp_events.warn_limited(client, "udp_send_failed", "UDP send attempt failed: %s", tostring(sent))
 			break

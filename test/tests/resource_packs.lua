@@ -20,4 +20,12 @@ assert(config.resolve({ disableClientTiremarks = false }).disableClientTiremarks
 assert(config.resolve({ disableClientTiremarks = "true" }).disableClientTiremarks == false)
 assert(config.DEFAULTS.disableClientTiremarks == false)
 
+for _, key in ipairs({ "disableDiscordJoin", "hideDiscordDetails" }) do
+	assert(config.DEFAULTS[key] == false)
+	assert(config.resolve(nil)[key] == false)
+	assert(config.resolve({ [key] = true })[key] == true)
+	assert(config.resolve({ [key] = false })[key] == false)
+	assert(config.resolve({ [key] = "true" })[key] == false)
+end
+
 print("resource pack and tiremark policy config checks passed")

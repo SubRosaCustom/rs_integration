@@ -171,7 +171,8 @@ package.loaded["main.src.udp_events"] = {
 local network = require("main.src.network")
 local clients = {}
 local state = { clients = clients, sync_generation = 3, runtime_id = "runtime",
-	manifest_hash = "new scope", config = { disallowedPaths = {}, disableClientTiremarks = true },
+	manifest_hash = "new scope", config = { disallowedPaths = {}, disableClientTiremarks = true,
+		disableDiscordJoin = true, hideDiscordDetails = true, },
 	tick = 100, refresh_notice_spread_ticks = 0, }
 local function add_client(hello, bound, open, valid)
 	local connection = { is_open = open, address = "127.0.0.1" }
@@ -207,6 +208,7 @@ for _, connection in ipairs({ pending, bound }) do
 	local message = json.decode(client.send_queue[1])
 	assert(message.type == "REFRESH_NOTICE" and message.payload.syncGeneration == 4)
 	assert(message.payload.disableClientTiremarks == true)
+	assert(message.payload.disableDiscordJoin == true and message.payload.hideDiscordDetails == true)
 	assert(message.payload.manifestHash == "new scope" and message.payload.pluginReload == "disabled-plugin")
 	assert(client.sync_state == "capable" and client.generation == 4)
 	assert(client.ready_generation == 0 and not client.ready_manifest_hash and not client.udp_events_ready)

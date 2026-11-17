@@ -128,6 +128,8 @@ local function handle_hello(state, connection, payload)
 		protocol = protocol.VERSION,
 		disallowedPaths = state.config.disallowedPaths,
 		disableClientTiremarks = state.config.disableClientTiremarks == true,
+		disableDiscordJoin = state.config.disableDiscordJoin == true,
+		hideDiscordDetails = state.config.hideDiscordDetails == true,
 		port = server.port,
 		udpToken = udp_token,
 		maxEventBytes = state.config.maxEventBytes,

@@ -30,6 +30,42 @@ local client = {
 local state = { clients_by_token = {}, clients_by_endpoint = {}, udp_backlog = {}, clients = { [connection] = client, }, config = { maxEventBytes = 262144, }, }
 udp.set_token(state, connection, client, token)
 udp.bind_endpoint(state, connection, client)
+local endpoint_index = state.clients_by_endpoint
+local lookups = 0
+state.clients_by_endpoint = setmetatable({}, { __index = function(_, key)
+	lookups = lookups + 1
+	return endpoint_index[key]
+end, })
+local endpoint = udp.resolve_send_endpoint(state, "127.0.0.1", "27071")
+assert(udp.has_bound_client(state, "127.0.0.1", "27071", endpoint))
+local writes = 0
+memory = {
+	getBaseAddress = function() return 0 end,
+	readInt = function(address) return address == 0x39075C7C and 5 or 0 end,
+	readBytes = function(_, length) return length == 5 and "\0\0\0\0\1" or string.rep("\0", length) end,
+	writeBytes = function() writes = writes + 1 end,
+	writeInt = function() writes = writes + 1 end,
+}
+local marker = require("main.src.browser_marker")
+state.browser_marker_mutation_stack = {}
+marker.on_send_packet(state, "127.0.0.1", "27071", endpoint)
+assert(writes == 0, "bound open client does not receive a browser marker")
+udp.on_send_packet(state, "127.0.0.1", "27071", endpoint)
+assert(lookups == 1, "marker and flush reuse one endpoint lookup")
+connection.is_open = false
+assert(not udp.has_bound_client(state, "127.0.0.1", 27071, endpoint), "open state is checked at use")
+connection.is_open = true
+endpoint_index[client.udp_endpoint_key] = nil
+endpoint = udp.resolve_send_endpoint(state, "127.0.0.1", 27071)
+assert(not udp.has_bound_client(state, "127.0.0.1", 27071, endpoint), "next callback sees unbinding")
+marker.on_send_packet(state, "127.0.0.1", 27071, endpoint)
+assert(writes > 0, "unbound endpoint receives a browser marker")
+marker.on_post_send_packet(state)
+udp.on_send_packet(state, "127.0.0.1", 27071, endpoint)
+assert(lookups == 2, "missing endpoint does not trigger a second lookup")
+endpoint_index[client.udp_endpoint_key] = connection
+state.clients_by_endpoint = endpoint_index
+outbound = {}
 local remote = reliable.new()
 local event_hash = assert(udp.hash_event_name("test.fragments"))
 local value = string.rep("x", 262130)

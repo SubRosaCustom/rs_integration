@@ -328,6 +328,8 @@ function network.refresh(state, plugin_name)
 				runtimeID = state.runtime_id,
 				disallowedPaths = state.config.disallowedPaths,
 				disableClientTiremarks = state.config.disableClientTiremarks == true,
+				disableDiscordJoin = state.config.disableDiscordJoin == true,
+				hideDiscordDetails = state.config.hideDiscordDetails == true,
 				syncGeneration = generation,
 				manifestHash = state.manifest_hash,
 				pluginReload = plugin_name,
@@ -371,8 +373,8 @@ function network.logic_step(state)
 	process_clients(state)
 end
 
-function network.on_send_packet(state, address, port)
-	udp_events.on_send_packet(state, address, port)
+function network.on_send_packet(state, address, port, endpoint)
+	udp_events.on_send_packet(state, address, port, endpoint)
 end
 
 function network.on_packet_receive(state)

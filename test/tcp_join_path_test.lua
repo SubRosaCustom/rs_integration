@@ -115,7 +115,9 @@ local function per_client(s)
 	end
 	return json.encode(sanitize.sanitize_value({ type = "INDEX_RES", payload = {
 		bundles = bundles, disallowedPaths = s.config.disallowedPaths or {},
-		disableClientTiremarks = s.config.disableClientTiremarks == true, loadedLevel = s.loaded_level,
+		disableClientTiremarks = s.config.disableClientTiremarks == true,
+		disableDiscordJoin = s.config.disableDiscordJoin == true,
+		hideDiscordDetails = s.config.hideDiscordDetails == true, loadedLevel = s.loaded_level,
 		persistentMode = s.persistent_mode, runtimeID = s.runtime_id, syncGeneration = s.sync_generation,
 		manifestHash = s.manifest_hash } })) .. "\n"
 end

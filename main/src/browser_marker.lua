@@ -10,8 +10,8 @@ local MAX_PACKET_SIZE = 0x10000
 local MARKER = "SRCE"
 local BASE_ADDRESS = memory.getBaseAddress()
 
-function browser_marker.on_send_packet(state, address, port)
-	if udp_events.has_bound_client(state, address, port) then
+function browser_marker.on_send_packet(state, address, port, endpoint)
+	if udp_events.has_bound_client(state, address, port, endpoint) then
 		return
 	end
 
